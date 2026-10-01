@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -15,6 +15,8 @@ const LS = {
 const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager', FERIE_KEY = 'renewtechAntalisFerie';
 const closedNow = () => defaultClosed(todayUTC, LS.get(FERIE_KEY) || {});
 // Stock counts: { code: { pallets, per, at } } in this browser; the engine wants base units.
+const rateOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.perWeek > 0) o[k] = v.perWeek / 7; return o; };
+const LONG_WARN = 21; // days ahead that long-lead items are always shown
 const stockOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.pallets >= 0 && v.per > 0) o[k] = { base: v.pallets * v.per, at: v.at }; return o; };
 const fmtTime = t => new Date(t).toLocaleString('da-DK', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDate = t => new Date(t).toLocaleDateString('da-DK', { day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -104,6 +106,7 @@ function ui() {
     .spacer { flex: 1 }
     .next { padding: 10px 18px; background: #e1ebf6; color: #1e3a5a; border-bottom: 1px solid #c9d8ea }
     .next span { color: #2d5b8a }
+    .long { padding: 10px 18px; background: #fbe3e1; color: #8c1d18; border-bottom: 1px solid #f1c4c0 }
     .year { padding: 6px 18px 14px } .year h4 { margin: 14px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #636a70 }
     .year ul { margin: 0; padding-left: 18px } .year li { margin: 2px 0 } .year .late { color: #b3261e; font-weight: 600 }
     .stockp { padding: 10px 18px 14px } .stockp input { width: 70px; font: 600 14px Consolas, monospace; padding: 5px 7px; border: 1px solid #d9d7d0; border-radius: 6px; text-align: right }
@@ -123,6 +126,7 @@ function ui() {
       <div class="seg views"><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="stock" aria-pressed="false">Lager</button></div>
     </div>
     <div class="next" hidden></div>
+    <div class="long" hidden></div>
     <div class="warn" hidden></div>
     <div class="msg">Starter…</div>
     <div class="scroll year" hidden></div>
@@ -187,7 +191,7 @@ function ui() {
   let horizon = 7, showAll = false;
   const picks = new Map();
   const pickFor = it => {
-    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && !it.inactive && it.orders >= 3 && !(it.onTheWay && it.state !== 'now') && it.plan.daysLeft <= horizon, qty: it.plan.qty });
+    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && !it.inactive && (it.orders >= 3 || it.counted || it.rateManual) && !(it.onTheWay && it.state !== 'now') && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= 14)), qty: it.plan.qty });
     return picks.get(it.code);
   };
   const statusPill = it => {
@@ -198,17 +202,23 @@ function ui() {
     return `<span class="pill ok">OK til ${fmtDate(p.orderBy)}</span>`;
   };
   const why = it => {
-    const bw = BASE_WORD(it), week = it.rate * 7;
+    const bw = BASE_WORD(it), week = (it.rateUsed || it.rate) * 7;
+    const leadTxt = it.longLead ? `lev.tid op til ${it.plan.lead} d + ${it.plan.buffer} d buffer` : `lev.tid ${it.lead} d`;
+    const useTxt = it.rateManual ? 'bruger (indtastet)' : 'bruger ca.';
     const lastQty = it.last.base, f = it.factors[it.plan.unit] || 1;
     const s = (LS.get(STOCK_KEY) || {})[it.code];
-    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · bruger ca. ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · lev.tid ${it.lead} d · løber tør ca. ${fmtDate(it.plan.runout)}`;
-    return `Bruger ca. ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · sidst bestilt ${fmtDate(it.last.date)} (${fmtNum(lastQty)} ${bw}) · lev.tid ${it.lead} d · løber tør ca. ${fmtDate(it.plan.runout)}` + (f > 1 ? '' : '');
+    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · ${useTxt} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}`;
+    return `${useTxt[0].toUpperCase() + useTxt.slice(1)} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · sidst bestilt ${fmtDate(it.last.date)} (${fmtNum(lastQty)} ${bw}) · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}` + (f > 1 ? '' : '');
   };
 
   const render = () => {
-    plan(items, todayUTC, { horizon, stock: stockOpts(), closed: closedNow() });
+    plan(items, todayUTC, { horizon, stock: stockOpts(), rate: rateOpts(), closed: closedNow() });
+    // Long lead time: always warn three weeks ahead, whatever the chosen period.
+    const longDue = items.filter(it => it.plan && it.longLead && !it.inactive && !cart[it.code] && !it.sentAfter && it.plan.daysLeft <= LONG_WARN).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
+    $('.long').hidden = !longDue.length;
+    $('.long').innerHTML = longDue.length ? '<b>Lang leveringstid · bestil i god tid:</b> ' + longDue.map(it => `${esc(it.code)} ${esc(it.title.split(',')[0].slice(0, 30))} (${it.plan.lead} d) ${it.plan.daysLeft <= 0 ? '<b>nu</b>' : 'senest <b>' + fmtDate(it.plan.orderBy) + '</b>'}`).join(' · ') : '';
     // When is the next order? Group items whose order-by dates fall within 3 days of the earliest.
-    const due = items.filter(it => it.plan && !it.inactive && !cart[it.code] && !it.sentAfter && it.orders >= 3 || (it.plan && it.counted && !cart[it.code])).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
+    const due = items.filter(it => it.plan && !it.inactive && !cart[it.code] && !it.sentAfter && (it.orders >= 3 || it.counted || it.rateManual || it.longLead)).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
     if (due.length) {
       const d0 = due[0].plan.orderBy, g1 = due.filter(it => it.plan.orderBy <= d0 + 3 * DAY);
       const rest = due.filter(it => it.plan.orderBy > d0 + 3 * DAY), d1 = rest.length ? rest[0].plan.orderBy : null, g2 = d1 ? rest.filter(it => it.plan.orderBy <= d1 + 3 * DAY) : [];
@@ -220,7 +230,7 @@ function ui() {
     $('.bar').hidden = false;
     $('.main').hidden = view !== 'list'; $('.year').hidden = view !== 'year'; $('.stockp').hidden = view !== 'stock';
     if (view !== 'list') { $('footer').hidden = true; $('.msg').hidden = true; return view === 'year' ? renderYear() : renderStock(); }
-    const list = items.filter(it => it.plan && (showAll || (it.plan.daysLeft <= horizon && !it.inactive) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
+    const list = items.filter(it => it.plan && (showAll || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
     $('.bar').hidden = false;
     $('.main table').hidden = !list.length;
     $('footer').hidden = !list.length;
@@ -230,6 +240,7 @@ function ui() {
       const p = pickFor(it), f = it.factors[it.plan.unit] || 1, c = cart[it.code];
       const flags = [
         it.unique ? '<span class="pill uniq">Kundeunik</span>' : '',
+        it.longLead ? `<span class="pill now">Lang leveringstid · ${it.plan.lead} d</span>` : '',
         it.plan.holiday ? `<span class="pill soon">Bestil før ${esc(it.plan.holiday)}</span>` : '',
         it.sentAfter ? `<span class="pill info">Lagt i kurven af bogmærket ${fmtTime(it.sentAfter.at)} · regnet som bestilt</span>` : '',
         it.onTheWay ? `<span class="pill info">På vej · lev. ${fmtDate(it.onTheWay)}</span>` : '',
@@ -312,20 +323,21 @@ function ui() {
     const s = LS.get(STOCK_KEY) || {};
     const list = items.filter(it => it.unique || !it.desc || s[it.code]).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'da'));
     $('.stockp').innerHTML = `<p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Tallene gemmes i denne browser.</p>
-      <table><thead><tr><th>Varenr.</th><th>Vare</th><th style="text-align:right">Paller nu</th><th style="text-align:right">Stk pr. palle</th><th>Sidst talt</th></tr></thead><tbody>${list.map(it => {
+      <table><thead><tr><th>Varenr.</th><th>Vare</th><th style="text-align:right">Paller nu</th><th style="text-align:right">Stk pr. palle</th><th style="text-align:right">Forbrug stk/uge</th><th>Sidst talt</th></tr></thead><tbody>${list.map(it => {
         const v = s[it.code] || {};
         return `<tr data-code="${esc(it.code)}"><td class="code">${esc(it.code)}</td><td>${esc(it.title.slice(0, 70))}${it.orders < 2 ? '<span class="why">Kun købt én gang i perioden: forbruget kan ikke regnes endnu</span>' : ''}</td>
           <td class="qty"><input class="pal" type="number" min="0" step="0.5" value="${v.pallets ?? ''}"></td>
           <td class="qty"><input class="per" type="number" min="1" value="${v.per || defPer(it)}"></td>
+          <td class="qty"><input class="pw" type="number" min="0" step="1" value="${v.perWeek || ''}" placeholder="${it.rate > 0 ? Math.round(it.rate * 7) : '?'}" title="Lad stå tomt for at bruge planens eget tal (grå)"></td>
           <td>${v.at ? fmtDate(v.at) : ''}</td></tr>`;
       }).join('')}</tbody></table><button class="save">Gem lager og regn igen</button>`;
     $('.stockp .save').onclick = () => {
       const s2 = LS.get(STOCK_KEY) || {};
       $('.stockp').querySelectorAll('tr[data-code]').forEach(tr => {
-        const code = tr.dataset.code, palRaw = tr.querySelector('.pal').value, per = +tr.querySelector('.per').value;
-        if (palRaw === '') { delete s2[code]; return; }
+        const code = tr.dataset.code, palRaw = tr.querySelector('.pal').value, per = +tr.querySelector('.per').value, pw = +tr.querySelector('.pw').value || 0;
+        if (palRaw === '' && !pw) { delete s2[code]; return; }
         const pallets = +String(palRaw).replace(',', '.'), old = s2[code];
-        s2[code] = { pallets, per: per > 0 ? per : 250, at: old && old.pallets === pallets && old.per === per ? old.at : Date.now() };
+        s2[code] = palRaw === '' ? { perWeek: pw, at: Date.now() } : { pallets, per: per > 0 ? per : 250, perWeek: pw, at: old && old.pallets === pallets && old.per === per ? old.at : Date.now() };
       });
       LS.set(STOCK_KEY, s2);
       picks.clear(); setView('list');

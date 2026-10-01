@@ -121,6 +121,8 @@ function buildItems(rows) {
     const events = [...ev.values()].sort((a, b) => a.date - b.date);
     const leads = lines.filter(l => l.deliv).map(l => Math.max(0, Math.round((l.deliv - l.date) / DAY)));
     const lead = leads.length ? Math.round(median(leads)) : 2;
+    // Long lead times vary a lot (705389: 29 and 47 days), so plan with the slowest of the last three deliveries.
+    const leadSafe = lead >= 14 ? Math.max(lead, ...leads.slice(-3)) : lead;
     const usage = [];
     for (let i = 0; i < events.length - 1; i++) {
       const days = (events[i + 1].date - events[i].date) / DAY;
@@ -133,7 +135,7 @@ function buildItems(rows) {
     items.push({
       code, desc, category: desc.split(',')[0] || '(ingen beskrivelse)',
       title: desc.split(',').slice(1).join(',').trim() || desc || '(ingen beskrivelse i eksporten)',
-      unique: /kundeunikke/i.test(desc), lines, events, factors, assumed, lead, rate,
+      unique: /kundeunikke/i.test(desc), lines, events, factors, assumed, lead, leadSafe, longLead: leadSafe >= 14, rate,
       every: intervals.length ? Math.round(median(intervals)) : null,
       orders: events.length, typicalBase, orderUnit, last: events[events.length - 1]
     });
@@ -147,7 +149,11 @@ function plan(items, today, opts = {}) {
   const buffer = opts.buffer ?? 3, horizon = opts.horizon ?? 7;
   for (const it of items) {
     it.plan = null;
-    if (it.orders < 2 || !(it.rate > 0)) { it.state = 'single'; continue; }
+    // A usage typed in by hand (opts.rate[code], per day) beats the estimate, and lets an item bought only once be planned.
+    const override = opts.rate && opts.rate[it.code] > 0 ? opts.rate[it.code] : null;
+    const rate = override || it.rate;
+    it.rateUsed = rate; it.rateManual = !!override;
+    if ((it.orders < 2 && !override) || !(rate > 0)) { it.state = 'single'; continue; }
     // Simulate stock: each order arrives on its delivery date, usage runs at a constant rate.
     // A stock count (opts.stock[code] = { base, at }) replaces the history before the count; later arrivals are added on top.
     const count = opts.stock && opts.stock[it.code];
@@ -155,10 +161,10 @@ function plan(items, today, opts = {}) {
     let stock = 0, t = null;
     if (count) {
       stock = count.base; t = count.at;
-      for (const e of arrivals.filter(e => e.at > count.at)) { stock = Math.max(0, stock - it.rate * (e.at - t) / DAY) + e.base; t = e.at; }
+      for (const e of arrivals.filter(e => e.at > count.at)) { stock = Math.max(0, stock - rate * (e.at - t) / DAY) + e.base; t = e.at; }
     } else {
       for (const e of arrivals) {
-        if (t !== null) stock = Math.max(0, stock - it.rate * (e.at - t) / DAY);
+        if (t !== null) stock = Math.max(0, stock - rate * (e.at - t) / DAY);
         stock += e.base; t = e.at;
       }
     }
@@ -166,24 +172,26 @@ function plan(items, today, opts = {}) {
     // Stock on the shelf today: same walk, but only deliveries that have arrived.
     let s2 = count ? count.base : 0, t2 = count ? count.at : null;
     for (const e of arrivals.filter(e => e.at <= today && (!count || e.at > count.at))) {
-      if (t2 !== null) s2 = Math.max(0, s2 - it.rate * (e.at - t2) / DAY);
+      if (t2 !== null) s2 = Math.max(0, s2 - rate * (e.at - t2) / DAY);
       s2 += e.base; t2 = e.at;
     }
-    it.stockNow = t2 === null ? 0 : Math.max(0, s2 - it.rate * Math.max(0, today - t2) / DAY);
-    const runout = t + (stock / it.rate) * DAY;
+    it.stockNow = t2 === null ? 0 : Math.max(0, s2 - rate * Math.max(0, today - t2) / DAY);
+    const runout = t + (stock / rate) * DAY;
     const closed = opts.closed || [];
-    const orderBy = latestOrder(runout - buffer * DAY, it.lead, closed);
-    const plain = prevWeekday(runout - (it.lead + buffer) * DAY);
-    it._closed = closed; it._buffer = buffer;
+    // Long lead time: extra buffer of 20 % of the lead time (at least the normal 3 days).
+    const buf = it.longLead ? Math.max(buffer, Math.ceil(0.2 * it.leadSafe)) : buffer;
+    const orderBy = latestOrder(runout - buf * DAY, it.leadSafe, closed);
+    const plain = prevWeekday(runout - (it.leadSafe + buf) * DAY);
+    it._closed = closed; it._buffer = buf;
     const f = it.factors[it.orderUnit] || 1;
     const qty = Math.max(1, Math.ceil(it.typicalBase / f - 1e-9));
     const daysLeft = Math.round((orderBy - today) / DAY);
     it.state = daysLeft <= 0 ? 'now' : daysLeft <= horizon ? 'soon' : 'ok';
     // Not bought for far longer than usual: probably replaced or no longer used.
-    it.inactive = (today - it.last.date) / DAY > Math.max(60, 3 * (it.every || 0));
+    it.inactive = !count && !override && (today - it.last.date) / DAY > Math.max(60, 3 * (it.every || 0));
     const open = it.events.filter(e => e.open && e.deliv && e.deliv >= today);
     it.onTheWay = open.length ? Math.max(...open.map(e => e.deliv)) : null;
-    it.plan = { runout, orderBy, daysLeft, qty, unit: it.orderUnit, base: qty * f, lowData: it.orders < 3, holiday: orderBy < plain ? holidayBetween(orderBy, runout, closed) : null };
+    it.plan = { runout, orderBy, daysLeft, qty, unit: it.orderUnit, base: qty * f, lowData: it.orders < 3 && !override, lead: it.leadSafe, buffer: buf, holiday: orderBy < plain ? holidayBetween(orderBy, runout, closed) : null };
   }
   return items;
 }
@@ -210,17 +218,18 @@ function holidayBetween(a, b, closed) { const c = closed.find(c => c.to >= a && 
 
 // Future order dates for one item over the next `days`: first the order-by date, then one typical order each time the previous one is used up.
 function yearPlan(it, today, days = 365) {
-  if (!it.plan || it.inactive || !(it.rate > 0)) return [];
+  const rate = it.rateUsed || it.rate;
+  if (!it.plan || it.inactive || !(rate > 0)) return [];
   const closed = it._closed || [], buffer = it._buffer ?? 3;
-  const out = [], cover = Math.max(7, it.plan.base / it.rate) * DAY;
+  const out = [], cover = Math.max(7, it.plan.base / rate) * DAY;
   let runout = it.plan.runout, at = it.plan.orderBy;
   for (let i = 0; at < today + days * DAY && i < 60; i++) {
-    const plain = prevWeekday(runout - (it.lead + buffer) * DAY);
+    const plain = prevWeekday(runout - (it.leadSafe + buffer) * DAY);
     const o = { at: Math.max(at, today), qty: it.plan.qty, unit: it.plan.unit, late: at < today, holiday: at < plain ? holidayBetween(at, runout, closed) : null };
     const prev = out[out.length - 1];
     if (prev && prev.at === o.at) { prev.qty += o.qty; prev.holiday = prev.holiday || o.holiday; } else out.push(o);
     runout += cover;
-    at = latestOrder(runout - buffer * DAY, it.lead, closed);
+    at = latestOrder(runout - buffer * DAY, it.leadSafe, closed);
   }
   return out;
 }
