@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -12,7 +12,8 @@ const LS = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
 };
-const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager';
+const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager', FERIE_KEY = 'renewtechAntalisFerie';
+const closedNow = () => defaultClosed(todayUTC, LS.get(FERIE_KEY) || {});
 // Stock counts: { code: { pallets, per, at } } in this browser; the engine wants base units.
 const stockOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.pallets >= 0 && v.per > 0) o[k] = { base: v.pallets * v.per, at: v.at }; return o; };
 const fmtTime = t => new Date(t).toLocaleString('da-DK', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -205,7 +206,7 @@ function ui() {
   };
 
   const render = () => {
-    plan(items, todayUTC, { horizon, stock: stockOpts() });
+    plan(items, todayUTC, { horizon, stock: stockOpts(), closed: closedNow() });
     // When is the next order? Group items whose order-by dates fall within 3 days of the earliest.
     const due = items.filter(it => it.plan && !it.inactive && !cart[it.code] && !it.sentAfter && it.orders >= 3 || (it.plan && it.counted && !cart[it.code])).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
     if (due.length) {
@@ -229,6 +230,7 @@ function ui() {
       const p = pickFor(it), f = it.factors[it.plan.unit] || 1, c = cart[it.code];
       const flags = [
         it.unique ? '<span class="pill uniq">Kundeunik</span>' : '',
+        it.plan.holiday ? `<span class="pill soon">Bestil før ${esc(it.plan.holiday)}</span>` : '',
         it.sentAfter ? `<span class="pill info">Lagt i kurven af bogmærket ${fmtTime(it.sentAfter.at)} · regnet som bestilt</span>` : '',
         it.onTheWay ? `<span class="pill info">På vej · lev. ${fmtDate(it.onTheWay)}</span>` : '',
         it.plan.lowData ? `<span class="pill plain">Kun ${it.orders} køb</span>` : '',
@@ -273,22 +275,39 @@ function ui() {
     const byMonth = new Map();
     for (const e of ev) { const d = new Date(e.at), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byMonth.has(k)) byMonth.set(k, []); byMonth.get(k).push(e); }
     const month = k => new Date(Date.UTC(Math.floor(k / 12), k % 12, 1)).toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-    $('.year').innerHTML = !ev.length ? '<p>Ingen varer med nok køb til en årsplan.</p>'
-      : '<p style="color:#636a70;margin:8px 0">Forventede bestillinger de næste 12 måneder med det typiske antal. Datoerne flytter sig, når I bestiller, eller når forbruget ændrer sig. Indtast lager under “Lager” for jeres egne kasser.</p>'
+    const fc = Object.assign({ jul: { fromDay: 22, toDay: 2 }, sommer: { fromWeek: 29, toWeek: 31 } }, LS.get(FERIE_KEY) || {});
+    const periods = closedNow().filter(c => c.to >= todayUTC).map(c => `${c.name} ${fmtDate(c.from)} – ${fmtDate(c.to)} ${new Date(c.to).getUTCFullYear()}`).join(' · ');
+    const ferieHtml = `<div class="ferie" style="margin:10px 0;padding:10px 12px;border:1px solid #ecdcb4;background:#fbf6ea;border-radius:8px">
+      <b>Lukkeperioder</b> <span style="color:#636a70">(leverandøren producerer og leverer ikke)</span>: ${esc(periods)}<br>
+      <span style="color:#636a70">Jul fra</span> <input class="jf" type="number" min="1" max="31" value="${fc.jul.fromDay}" style="width:52px"> dec. <span style="color:#636a70">til</span> <input class="jt" type="number" min="1" max="31" value="${fc.jul.toDay}" style="width:52px"> jan. ·
+      <span style="color:#636a70">Sommerferie uge</span> <input class="sf" type="number" min="1" max="53" value="${fc.sommer.fromWeek}" style="width:52px"> <span style="color:#636a70">til</span> <input class="st" type="number" min="1" max="53" value="${fc.sommer.toWeek}" style="width:52px">
+      <button class="saveferie" style="margin-left:6px;border:1px solid #8a5a00;background:#fff;color:#8a5a00;border-radius:6px;padding:3px 9px;cursor:pointer">Gem</button>
+      <br><span style="color:#636a70">Leveringstid tælles kun i åbne dage. Bestillinger der ellers ville ramme lukningen, flyttes frem og mærkes “før jul” / “før sommerferien”.</span></div>`;
+    $('.year').innerHTML = ferieHtml + (!ev.length ? '<p>Ingen varer med nok køb til en årsplan.</p>'
+      : '<p style="color:#636a70;margin:8px 0">Forventede bestillinger de næste 12 måneder med det typiske antal. Datoerne flytter sig, når I bestiller, eller når forbruget ændrer sig. Indtast lager under “Lager” for jeres egne kasser.</p>')
+      + (!ev.length ? '' : '')
       + [...byMonth].map(([k, list]) => {
         const per = new Map();
         for (const e of list) { if (!per.has(e.it.code)) per.set(e.it.code, []); per.get(e.it.code).push(e); }
         const rows = [...per.values()].sort((a, b) => a[0].at - b[0].at).map(es => {
           const e = es[0], it = e.it, late = es.some(x => x.late);
           const days = es.map(x => x.late ? 'nu' : new Date(x.at).getUTCDate() + '.').join(', ');
-          return `<li class="${late ? 'late' : ''}"><b>${es.length > 1 ? es.length + ' × ' : ''}${e.qty} ${esc(unitDa(e.unit, e.qty))}</b> · ${esc(it.code)} ${esc(it.title.slice(0, 60))} <span style="color:#636a70">(${days})</span>${it.plan.lowData ? ' <span class="pill plain">få køb</span>' : ''}${it.counted ? ' <span class="pill info">lager talt</span>' : ''}${it.unique ? ' <span class="pill uniq">kundeunik</span>' : ''}</li>`;
+          const sameQty = es.every(x => x.qty === e.qty), hol = es.find(x => x.holiday);
+          const qtyTxt = sameQty ? `${es.length > 1 ? es.length + ' × ' : ''}${e.qty} ${esc(unitDa(e.unit, e.qty))}` : es.map(x => x.qty).join(' + ') + ' ' + esc(unitDa(e.unit, 2));
+          return `<li class="${late ? 'late' : ''}"><b>${qtyTxt}</b> · ${esc(it.code)} ${esc(it.title.slice(0, 60))} <span style="color:#636a70">(${days})</span>${hol ? ` <span class="pill soon">før ${esc(hol.holiday)}</span>` : ''}${it.plan.lowData ? ' <span class="pill plain">få køb</span>' : ''}${it.counted ? ' <span class="pill info">lager talt</span>' : ''}${it.unique ? ' <span class="pill uniq">kundeunik</span>' : ''}</li>`;
         }).join('');
         return `<h4>${month(k)} · ${list.length} bestillinger af ${per.size} varer</h4><ul>${rows}</ul>`;
       }).join('');
+    $('.saveferie').onclick = () => {
+      const v = c => Math.round(+$('.ferie ' + c).value) || 0;
+      LS.set(FERIE_KEY, { jul: { fromDay: v('.jf') || 22, toDay: v('.jt') || 2 }, sommer: { fromWeek: v('.sf'), toWeek: v('.st') } });
+      picks.clear(); render();
+    };
   }
 
   // Stock view: pallets on the shelf for your own boxes; the plan then counts from this instead of guessing.
-  const defPer = it => (!it.assumed.includes('Pallet(s)') && it.factors['Pallet(s)']) || Math.round(it.typicalBase) || 250;
+  // Renewtech's own boxes: 250 per pallet (confirmed 01-10-2026). Other items: Antalis' pallet size when known.
+  const defPer = it => (it.unique || !it.desc) ? 250 : (!it.assumed.includes('Pallet(s)') && it.factors['Pallet(s)']) || Math.round(it.typicalBase) || 250;
   function renderStock() {
     const s = LS.get(STOCK_KEY) || {};
     const list = items.filter(it => it.unique || !it.desc || s[it.code]).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'da'));

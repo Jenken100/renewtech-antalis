@@ -171,7 +171,10 @@ function plan(items, today, opts = {}) {
     }
     it.stockNow = t2 === null ? 0 : Math.max(0, s2 - it.rate * Math.max(0, today - t2) / DAY);
     const runout = t + (stock / it.rate) * DAY;
-    const orderBy = prevWeekday(runout - (it.lead + buffer) * DAY);
+    const closed = opts.closed || [];
+    const orderBy = latestOrder(runout - buffer * DAY, it.lead, closed);
+    const plain = prevWeekday(runout - (it.lead + buffer) * DAY);
+    it._closed = closed; it._buffer = buffer;
     const f = it.factors[it.orderUnit] || 1;
     const qty = Math.max(1, Math.ceil(it.typicalBase / f - 1e-9));
     const daysLeft = Math.round((orderBy - today) / DAY);
@@ -180,17 +183,58 @@ function plan(items, today, opts = {}) {
     it.inactive = (today - it.last.date) / DAY > Math.max(60, 3 * (it.every || 0));
     const open = it.events.filter(e => e.open && e.deliv && e.deliv >= today);
     it.onTheWay = open.length ? Math.max(...open.map(e => e.deliv)) : null;
-    it.plan = { runout, orderBy, daysLeft, qty, unit: it.orderUnit, base: qty * f, lowData: it.orders < 3 };
+    it.plan = { runout, orderBy, daysLeft, qty, unit: it.orderUnit, base: qty * f, lowData: it.orders < 3, holiday: orderBy < plain ? holidayBetween(orderBy, runout, closed) : null };
   }
   return items;
 }
 
+// Holidays: periods { name, from, to } (UTC days) when the supplier neither produces nor delivers.
+// Lead time is counted in open days only, so an order placed before a holiday must go in earlier.
+const isClosed = (t, closed) => closed.some(c => t >= c.from && t <= c.to);
+function deliveryFrom(day, lead, closed) {
+  let d = day, n = 0;
+  while (n < lead) { d += DAY; if (!isClosed(d, closed)) n++; }
+  while (isClosed(d, closed)) d += DAY;
+  return d;
+}
+function latestOrder(needBy, lead, closed) {
+  let d = prevWeekday(needBy - lead * DAY);
+  if (!closed.length) return d;
+  for (let i = 0; i < 400; i++) {
+    if (!isClosed(d, closed) && deliveryFrom(d, lead, closed) <= needBy) break;
+    d = prevWeekday(d - DAY);
+  }
+  return d;
+}
+function holidayBetween(a, b, closed) { const c = closed.find(c => c.to >= a && c.from <= b); return c ? c.name : null; }
+
 // Future order dates for one item over the next `days`: first the order-by date, then one typical order each time the previous one is used up.
 function yearPlan(it, today, days = 365) {
   if (!it.plan || it.inactive || !(it.rate > 0)) return [];
+  const closed = it._closed || [], buffer = it._buffer ?? 3;
   const out = [], cover = Math.max(7, it.plan.base / it.rate) * DAY;
-  for (let t = it.plan.orderBy; t < today + days * DAY && out.length < 60; t += cover) out.push({ at: Math.max(t, today), qty: it.plan.qty, unit: it.plan.unit, late: t < today });
+  let runout = it.plan.runout, at = it.plan.orderBy;
+  for (let i = 0; at < today + days * DAY && i < 60; i++) {
+    const plain = prevWeekday(runout - (it.lead + buffer) * DAY);
+    const o = { at: Math.max(at, today), qty: it.plan.qty, unit: it.plan.unit, late: at < today, holiday: at < plain ? holidayBetween(at, runout, closed) : null };
+    const prev = out[out.length - 1];
+    if (prev && prev.at === o.at) { prev.qty += o.qty; prev.holiday = prev.holiday || o.holiday; } else out.push(o);
+    runout += cover;
+    at = latestOrder(runout - buffer * DAY, it.lead, closed);
+  }
   return out;
 }
 
-if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, UNIT_DA, DAY };
+// Default holidays: Christmas 22 Dec - 2 Jan and summer weeks 29-31, for this year and the next.
+function defaultClosed(today, cfg = {}) {
+  const y0 = new Date(today).getUTCFullYear(), out = [];
+  const jul = cfg.jul || { fromDay: 22, toDay: 2 }, som = cfg.sommer || { fromWeek: 29, toWeek: 31 };
+  const monday = (y, w) => { const j4 = Date.UTC(y, 0, 4), dow = (new Date(j4).getUTCDay() + 6) % 7; return j4 - dow * DAY + (w - 1) * 7 * DAY; };
+  for (const y of [y0 - 1, y0, y0 + 1]) {
+    out.push({ name: 'jul', from: Date.UTC(y, 11, jul.fromDay), to: Date.UTC(y + 1, 0, jul.toDay) });
+    if (som.fromWeek && som.toWeek) out.push({ name: 'sommerferien', from: monday(y, som.fromWeek), to: monday(y, som.toWeek) + 6 * DAY });
+  }
+  return out.filter(c => c.to >= today - 30 * DAY);
+}
+
+if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, defaultClosed, UNIT_DA, DAY };
