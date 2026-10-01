@@ -117,7 +117,7 @@ function buildItems(rows) {
       const e = ev.get(l.date) || { date: l.date, base: 0, deliv: null, open: false };
       e.base += l.qty * factors[l.unit];
       if (l.deliv && (!e.deliv || l.deliv > e.deliv)) e.deliv = l.deliv;
-      if (l.status && l.status !== 'Faktureret') e.open = true;
+      if (l.status && l.status !== 'Faktureret' && !(l.deliv && l.deliv < Date.now() - 14 * DAY)) e.open = true;
       ev.set(l.date, e);
     }
     const events = [...ev.values()].sort((a, b) => a.date - b.date);
@@ -153,12 +153,28 @@ function plan(items, today, opts = {}) {
     it.plan = null;
     // A usage typed in by hand (opts.rate[code], per day) beats the estimate, and lets an item bought only once be planned.
     const override = opts.rate && opts.rate[it.code] > 0 ? opts.rate[it.code] : null;
-    const rate = override || it.rate;
+    const count = opts.stock && opts.stock[it.code];
+    // Overbought: more bought in the last 60 days than 1.8 x the pace from before. Then the burst is not real usage,
+    // so plan with the earlier pace (unless a stock count or a typed usage says otherwise).
+    const older = it.events.filter(e => e.date < today - 60 * DAY), recentBase = it.events.filter(e => e.date >= today - 60 * DAY).reduce((s, e) => s + e.base, 0);
+    const olderSpan = older.length ? (today - 60 * DAY - older[0].date) / DAY : 0;
+    const baseRate = olderSpan >= 60 ? older.reduce((s, e) => s + e.base, 0) / olderSpan : NaN;
+    // Natural growth: compare 300-180 days ago with 180-60 days ago, as growth per month, kept within -15 % / +15 %.
+    // The expected pace today is the later window carried forward three months at that growth.
+    const sumIn = (a, b) => it.events.filter(e => e.date >= today - a * DAY && e.date < today - b * DAY).reduce((s, e) => s + e.base, 0);
+    const w1 = sumIn(300, 180) / 120, w2 = sumIn(180, 60) / 120;
+    const monthly = w1 > 0 && w2 > 0 ? Math.min(1.15, Math.max(0.85, Math.pow(w2 / w1, 30 / 120))) : 1;
+    const expected = w2 > 0 ? w2 * Math.pow(monthly, 3) : baseRate;
+    it.trend = w1 > 0 && w2 > 0 ? monthly : null;
+    // One ordinary order inside the window is not overbuying, so compare with the larger of 60 days' pace and a normal order.
+    const normalOrder = older.length ? median(older.map(e => e.base)) : 0;
+    const normal60 = Math.max(expected * 60, normalOrder);
+    it.overbought = !count && !override && expected > 0 && recentBase > 1.8 * normal60 ? { recentBase, normal: Math.round(normal60), x: recentBase / normal60 } : null;
+    const rate = override || (it.overbought ? Math.min(it.rate, expected) : it.rate);
     it.rateUsed = rate; it.rateManual = !!override;
     if ((it.orders < 2 && !override) || !(rate > 0)) { it.state = 'single'; continue; }
     // Simulate stock: each order arrives on its delivery date, usage runs at a constant rate.
     // A stock count (opts.stock[code] = { base, at }) replaces the history before the count; later arrivals are added on top.
-    const count = opts.stock && opts.stock[it.code];
     const arrivals = [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at);
     let stock = 0, t = null;
     if (count) {

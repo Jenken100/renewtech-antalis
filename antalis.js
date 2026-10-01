@@ -120,7 +120,7 @@ function buildItems(rows) {
       const e = ev.get(l.date) || { date: l.date, base: 0, deliv: null, open: false };
       e.base += l.qty * factors[l.unit];
       if (l.deliv && (!e.deliv || l.deliv > e.deliv)) e.deliv = l.deliv;
-      if (l.status && l.status !== 'Faktureret') e.open = true;
+      if (l.status && l.status !== 'Faktureret' && !(l.deliv && l.deliv < Date.now() - 14 * DAY)) e.open = true;
       ev.set(l.date, e);
     }
     const events = [...ev.values()].sort((a, b) => a.date - b.date);
@@ -156,12 +156,28 @@ function plan(items, today, opts = {}) {
     it.plan = null;
     // A usage typed in by hand (opts.rate[code], per day) beats the estimate, and lets an item bought only once be planned.
     const override = opts.rate && opts.rate[it.code] > 0 ? opts.rate[it.code] : null;
-    const rate = override || it.rate;
+    const count = opts.stock && opts.stock[it.code];
+    // Overbought: more bought in the last 60 days than 1.8 x the pace from before. Then the burst is not real usage,
+    // so plan with the earlier pace (unless a stock count or a typed usage says otherwise).
+    const older = it.events.filter(e => e.date < today - 60 * DAY), recentBase = it.events.filter(e => e.date >= today - 60 * DAY).reduce((s, e) => s + e.base, 0);
+    const olderSpan = older.length ? (today - 60 * DAY - older[0].date) / DAY : 0;
+    const baseRate = olderSpan >= 60 ? older.reduce((s, e) => s + e.base, 0) / olderSpan : NaN;
+    // Natural growth: compare 300-180 days ago with 180-60 days ago, as growth per month, kept within -15 % / +15 %.
+    // The expected pace today is the later window carried forward three months at that growth.
+    const sumIn = (a, b) => it.events.filter(e => e.date >= today - a * DAY && e.date < today - b * DAY).reduce((s, e) => s + e.base, 0);
+    const w1 = sumIn(300, 180) / 120, w2 = sumIn(180, 60) / 120;
+    const monthly = w1 > 0 && w2 > 0 ? Math.min(1.15, Math.max(0.85, Math.pow(w2 / w1, 30 / 120))) : 1;
+    const expected = w2 > 0 ? w2 * Math.pow(monthly, 3) : baseRate;
+    it.trend = w1 > 0 && w2 > 0 ? monthly : null;
+    // One ordinary order inside the window is not overbuying, so compare with the larger of 60 days' pace and a normal order.
+    const normalOrder = older.length ? median(older.map(e => e.base)) : 0;
+    const normal60 = Math.max(expected * 60, normalOrder);
+    it.overbought = !count && !override && expected > 0 && recentBase > 1.8 * normal60 ? { recentBase, normal: Math.round(normal60), x: recentBase / normal60 } : null;
+    const rate = override || (it.overbought ? Math.min(it.rate, expected) : it.rate);
     it.rateUsed = rate; it.rateManual = !!override;
     if ((it.orders < 2 && !override) || !(rate > 0)) { it.state = 'single'; continue; }
     // Simulate stock: each order arrives on its delivery date, usage runs at a constant rate.
     // A stock count (opts.stock[code] = { base, at }) replaces the history before the count; later arrivals are added on top.
-    const count = opts.stock && opts.stock[it.code];
     const arrivals = [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at);
     let stock = 0, t = null;
     if (count) {
@@ -266,7 +282,7 @@ function defaultClosed(today, cfg = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.11';
+const APP_VERSION = '1.12';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -460,7 +476,7 @@ function ui() {
   let horizon = 7, showAll = false;
   const picks = new Map();
   const pickFor = it => {
-    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && !it.inactive && (it.orders >= 3 || it.counted || it.rateManual) && !(it.onTheWay && it.state !== 'now') && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= 14)), qty: it.plan.qty });
+    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && !it.inactive && !it.overbought && (it.orders >= 3 || it.counted || it.rateManual) && !(it.onTheWay && it.state !== 'now') && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= 14)), qty: it.plan.qty });
     return picks.get(it.code);
   };
   const statusPill = it => {
@@ -473,11 +489,12 @@ function ui() {
   const why = it => {
     const bw = BASE_WORD(it), week = (it.rateUsed || it.rate) * 7;
     const leadTxt = it.longLead ? `lev.tid op til ${it.plan.lead} d + ${it.plan.buffer} d buffer` : `lev.tid ${it.lead} d`;
-    const useTxt = it.rateManual ? 'bruger (indtastet)' : 'bruger ca.';
+    const trendTxt = it.trend && Math.abs(it.trend - 1) >= 0.03 ? ` (udvikling ${it.trend > 1 ? '+' : ''}${Math.round((it.trend - 1) * 100)} %/md)` : '';
+    const useTxt = it.rateManual ? 'bruger (indtastet)' : it.overbought ? 'normalt forbrug ca.' : 'bruger ca.';
     const lastQty = it.last.base, f = it.factors[it.plan.unit] || 1;
     const s = (LS.get(STOCK_KEY) || {})[it.code];
-    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · ${useTxt} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}`;
-    return `${useTxt[0].toUpperCase() + useTxt.slice(1)} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · sidst bestilt ${fmtDate(it.last.date)} (${fmtNum(lastQty)} ${bw}) · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}` + (f > 1 ? '' : '');
+    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · ${useTxt} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge${trendTxt} · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}`;
+    return `${useTxt[0].toUpperCase() + useTxt.slice(1)} ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge${trendTxt} · sidst bestilt ${fmtDate(it.last.date)} (${fmtNum(lastQty)} ${bw}) · ${leadTxt} · løber tør ca. ${fmtDate(it.plan.runout)}` + (f > 1 ? '' : '');
   };
 
   const render = () => {
@@ -510,6 +527,7 @@ function ui() {
       const flags = [
         it.unique ? '<span class="pill uniq">Kundeunik</span>' : '',
         it.longLead ? `<span class="pill now">Lang leveringstid · ${it.plan.lead} d</span>` : '',
+        it.overbought ? `<span class="pill soon" title="Købt ${fmtNum(it.overbought.recentBase)} ${BASE_WORD(it)} de sidste 60 dage mod normalt ca. ${fmtNum(it.overbought.normal)}">Købt meget for nylig · tæl lageret</span>` : '',
         it.plan.holiday ? `<span class="pill soon">Bestil før ${esc(it.plan.holiday)}</span>` : '',
         it.sentAfter ? `<span class="pill info">Lagt i kurven af bogmærket ${fmtTime(it.sentAfter.at)} · regnet som bestilt</span>` : '',
         it.onTheWay ? `<span class="pill info">På vej · lev. ${fmtDate(it.onTheWay)}</span>` : '',
@@ -583,7 +601,9 @@ function ui() {
     const name = code => { const it = items.find(i => i.code === code); return it ? it.title.slice(0, 70) : ''; };
     const qtyTxt = (q, u) => `${fmtNum(q)} ${esc(UNIT_DA[u] ? unitDa(u, q) : u)}`;
     const real = allRows.filter(r => !r.sent);
-    const open = real.filter(r => r.status && r.status !== 'Faktureret');
+    const openAll = real.filter(r => r.status && r.status !== 'Faktureret');
+    const stale = openAll.filter(r => r.deliv && r.deliv < todayUTC - 14 * DAY);
+    const open = openAll.filter(r => !stale.includes(r));
     const recent = real.filter(r => r.status === 'Faktureret' && r.date >= todayUTC - 14 * DAY);
     const byOrder = rows => {
       const m = new Map();
@@ -605,9 +625,17 @@ function ui() {
     const recentOrders = byOrder(recent).sort((a, b) => b[0].date - a[0].date);
     $('.ordered').innerHTML = `
       <h4>I kurven nu · ${cartList.length} varer</h4>
-      ${cartList.length ? '<ul>' + cartList.map(([code, c]) => `<li><b>${qtyTxt(c.qty, c.unit)}</b> · ${esc(code)} ${esc(name(code))}</li>`).join('') + `</ul><p style="color:#636a70;margin:4px 0 0">Ikke bestilt endnu. <a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a> for at bestille.</p>` : '<p style="color:#636a70">Kurven er tom.</p>'}
+      ${cartList.length ? '<ul>' + cartList.map(([code, c]) => { const it = items.find(i => i.code === code); return `<li><b>${qtyTxt(c.qty, c.unit)}</b> · ${esc(code)} ${esc(name(code))}${it && it.overbought ? ' <span class="pill soon">Købt meget for nylig: overvej at fjerne den fra kurven, eller tæl lageret først</span>' : ''}</li>`; }).join('') + `</ul><p style="color:#636a70;margin:4px 0 0">Ikke bestilt endnu. <a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a> for at bestille.</p>` : '<p style="color:#636a70">Kurven er tom.</p>'}
       <h4>På vej fra Antalis · ${open.length} linjer i ${openOrders.length} ordrer</h4>
       ${openOrders.length ? openOrders.map(l => orderHtml(l, true)).join('') : '<p style="color:#636a70">Intet på vej.</p>'}
+      ${stale.length ? `<details style="margin:8px 0"><summary style="cursor:pointer;color:#636a70">${stale.length} gamle linjer står stadig som “${esc(stale[0].status)}” hos Antalis, men leveringsdatoen er mere end 14 dage gammel. De regnes som leveret.</summary>${byOrder(stale).map(l => orderHtml(l, false)).join('')}</details>` : ''}
+      ${(() => {
+        const ob = items.filter(it => it.overbought).sort((a, b) => b.overbought.x - a.overbought.x);
+        if (!ob.length) return '';
+        return `<h4>Købt mere end normalt · ${ob.length} varer (sidste 60 dage)</h4>
+          <p style="color:#636a70;margin:0 0 4px">Planen regner med jeres normale forbrug fra før for disse varer, og foreslår dem ikke, før det ekstra er brugt. Tæl lageret under “Lager”, hvis I vil have det helt præcist.</p>
+          <ul>${ob.map(it => `<li><b>${it.overbought.x.toFixed(1).replace('.', ',')} ×</b> normalt · ${esc(it.code)} ${esc(it.title.slice(0, 60))}: ${fmtNum(it.overbought.recentBase)} ${BASE_WORD(it)} mod normalt ca. ${fmtNum(it.overbought.normal)}${cart[it.code] ? ' <span class="pill soon">ligger også i kurven</span>' : ''}</li>`).join('')}</ul>`;
+      })()}
       <h4>Leveret de sidste 14 dage · ${recentOrders.length} ordrer</h4>
       ${recentOrders.length ? recentOrders.map(l => orderHtml(l, false)).join('') : '<p style="color:#636a70">Ingen.</p>'}
       <p style="color:#636a70;margin-top:12px">Bygger på ordrehistorikken hentet ${fmtTime(histAt)}${fromCache ? ' (gemt kopi, fordi “Min konto” har logget dig ud)' : ''}.</p>`;
@@ -618,8 +646,8 @@ function ui() {
   const defPer = it => (it.unique || !it.desc) ? 250 : (!it.assumed.includes('Pallet(s)') && it.factors['Pallet(s)']) || Math.round(it.typicalBase) || 250;
   function renderStock() {
     const s = LS.get(STOCK_KEY) || {};
-    const list = items.filter(it => it.unique || !it.desc || s[it.code]).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'da'));
-    $('.stockp').innerHTML = `<p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Hvert tal gemmes med det samme i denne browser.</p>
+    const list = items.filter(it => it.unique || !it.desc || s[it.code] || it.plan || it.overbought).sort((a, b) => ((b.unique || !b.desc) - (a.unique || !a.desc)) || (!!b.overbought - !!a.overbought) || (a.title || '').localeCompare(b.title || '', 'da'));
+    $('.stockp').innerHTML = `<input class="q" type="search" placeholder="Søg varenr. eller navn" style="width:260px;text-align:left;margin-bottom:8px"><p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Hvert tal gemmes med det samme i denne browser.</p>
       <table><thead><tr><th>Varenr.</th><th>Vare</th><th style="text-align:right">Paller nu</th><th style="text-align:right">Stk pr. palle</th><th style="text-align:right">Forbrug stk/uge</th><th>Sidst talt</th></tr></thead><tbody>${list.map(it => {
         const v = s[it.code] || {};
         return `<tr data-code="${esc(it.code)}"><td class="code">${esc(it.code)}</td><td>${esc(it.title.slice(0, 70))}${it.orders < 2 ? '<span class="why">Kun købt én gang i perioden: forbruget kan ikke regnes endnu</span>' : ''}</td>
@@ -644,6 +672,7 @@ function ui() {
       msg.textContent = ok ? `Gemt ✓ ${code}` : 'Kunne ikke gemme i browseren. Tjek at antalis.dk må gemme data (cookies og webstedsdata).';
       const last = tr.querySelector('td:last-child'); if (ok && s2[code]) last.textContent = fmtDate(s2[code].at);
     };
+    $('.stockp .q').addEventListener('input', ev => { const q = ev.target.value.trim().toLowerCase(); $('.stockp').querySelectorAll('tr[data-code]').forEach(tr => { tr.hidden = !!q && !tr.textContent.toLowerCase().includes(q) && !tr.dataset.code.includes(q); }); });
     $('.stockp').querySelectorAll('tr[data-code] input').forEach(inp => { inp.addEventListener('change', () => saveRow(inp.closest('tr'))); inp.addEventListener('input', () => saveRow(inp.closest('tr'))); });
     $('.stockp .save').onclick = () => { $('.stockp').querySelectorAll('tr[data-code]').forEach(saveRow); picks.clear(); setView('list'); };
   }
