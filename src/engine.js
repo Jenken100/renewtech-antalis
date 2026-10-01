@@ -16,35 +16,62 @@ const LIVE_UNITS = {
 function parseDate(s) {
   s = (s || '').trim();
   if (!s) return null;
-  s = s.split(/\s+/).pop().replace(/\//g, '-');
+  s = s.split(/\s+/).filter(x => /\d/.test(x)).pop() || '';
+  s = s.replace(/[/.]/g, '-');
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
   const m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
   return m ? Date.UTC(+m[3], +m[2] - 1, +m[1]) : null;
 }
 function parseNum(s) { return parseFloat(String(s || '').replace(/[\s ]/g, '').replace(/\./g, '').replace(',', '.')); }
 
-function splitCsvLine(line) {
+function splitCsvLine(line, sep = ';') {
   const out = []; let cur = '', q = false;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
     else if (c === '"') q = true;
-    else if (c === ';') { out.push(cur); cur = ''; }
+    else if (c === sep) { out.push(cur); cur = ''; }
     else cur += c;
   }
   out.push(cur); return out;
 }
 
+// Column names as Antalis writes them, in Danish and English.
+const COLS = {
+  no: ['ordrenummer', 'ordernumber', 'ordernr', 'ordreno'],
+  date: ['ordredato', 'orderdate'],
+  status: ['status', 'linestatus'],
+  item: ['varenummer', 'itemnumber', 'productcode', 'articlenumber', 'itemcode', 'sku'],
+  desc: ['beskrivelse', 'description'],
+  deliv: ['leveringsdato', 'deliverydate'],
+  qty: ['antal', 'quantity', 'qty'],
+  unit: ['enhed', 'unit']
+};
+
 function parseExport(text) {
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.length);
-  const head = splitCsvLine(lines[0]).map(h => h.trim());
-  const col = name => head.indexOf(name);
-  const C = { no: col('Ordrenummer'), date: col('Ordredato'), status: col('Status'), item: col('Varenummer'), desc: col('Beskrivelse'), deliv: col('Leveringsdato'), qty: col('Antal'), unit: col('Enhed') };
-  if (C.no < 0 || C.item < 0 || C.qty < 0) throw new Error('Filen ligner ikke en ordrehistorik fra Antalis. Den skal have kolonnerne Ordrenummer, Varenummer og Antal.');
+  text = String(text || '').replace(/^﻿/, '');
+  if (/^\s*</.test(text)) throw new Error('Antalis sendte en webside i stedet for ordrehistorikken. Log ud og ind igen på antalis.dk, og prøv igen.');
+  let lines = text.split(/\r?\n/).filter(l => l.trim().length);
+  if (!lines.length) throw new Error('Ordrehistorikken er tom.');
+  const h = lines.slice(0, 10).findIndex(l => /ordre\s*nummer|order\s*(number|no)/i.test(l));
+  if (h > 0) lines = lines.slice(h);
+  const first = lines[0];
+  const sep = [';', '\t', ','].sort((a, b) => first.split(b).length - first.split(a).length)[0];
+  const norm = s => s.toLowerCase().normalize('NFD').replace(/[^a-zæøå0-9]/g, '');
+  const head = splitCsvLine(first, sep).map(norm);
+  const col = key => { for (const n of COLS[key]) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
+  const C = {}; for (const k of Object.keys(COLS)) C[k] = col(k);
+  if (C.no < 0 || C.item < 0 || C.qty < 0) {
+    const peek = first.slice(0, 160).replace(/\s+/g, ' ');
+    throw new Error('Ordrehistorikken kunne ikke læses (kolonnerne Ordrenummer, Varenummer og Antal blev ikke fundet). Filen starter med: “' + peek + '”');
+  }
   const rows = []; let order = null;
   for (const l of lines.slice(1)) {
-    const r = splitCsvLine(l);
-    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) }; continue; }
+    const r = splitCsvLine(l, sep);
     const item = (r[C.item] || '').trim();
+    // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
+    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date) }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
     rows.push({ order: order.no, date: order.date, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
   }

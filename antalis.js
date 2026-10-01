@@ -19,35 +19,62 @@ const LIVE_UNITS = {
 function parseDate(s) {
   s = (s || '').trim();
   if (!s) return null;
-  s = s.split(/\s+/).pop().replace(/\//g, '-');
+  s = s.split(/\s+/).filter(x => /\d/.test(x)).pop() || '';
+  s = s.replace(/[/.]/g, '-');
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
   const m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
   return m ? Date.UTC(+m[3], +m[2] - 1, +m[1]) : null;
 }
 function parseNum(s) { return parseFloat(String(s || '').replace(/[\s ]/g, '').replace(/\./g, '').replace(',', '.')); }
 
-function splitCsvLine(line) {
+function splitCsvLine(line, sep = ';') {
   const out = []; let cur = '', q = false;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
     else if (c === '"') q = true;
-    else if (c === ';') { out.push(cur); cur = ''; }
+    else if (c === sep) { out.push(cur); cur = ''; }
     else cur += c;
   }
   out.push(cur); return out;
 }
 
+// Column names as Antalis writes them, in Danish and English.
+const COLS = {
+  no: ['ordrenummer', 'ordernumber', 'ordernr', 'ordreno'],
+  date: ['ordredato', 'orderdate'],
+  status: ['status', 'linestatus'],
+  item: ['varenummer', 'itemnumber', 'productcode', 'articlenumber', 'itemcode', 'sku'],
+  desc: ['beskrivelse', 'description'],
+  deliv: ['leveringsdato', 'deliverydate'],
+  qty: ['antal', 'quantity', 'qty'],
+  unit: ['enhed', 'unit']
+};
+
 function parseExport(text) {
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.length);
-  const head = splitCsvLine(lines[0]).map(h => h.trim());
-  const col = name => head.indexOf(name);
-  const C = { no: col('Ordrenummer'), date: col('Ordredato'), status: col('Status'), item: col('Varenummer'), desc: col('Beskrivelse'), deliv: col('Leveringsdato'), qty: col('Antal'), unit: col('Enhed') };
-  if (C.no < 0 || C.item < 0 || C.qty < 0) throw new Error('Filen ligner ikke en ordrehistorik fra Antalis. Den skal have kolonnerne Ordrenummer, Varenummer og Antal.');
+  text = String(text || '').replace(/^﻿/, '');
+  if (/^\s*</.test(text)) throw new Error('Antalis sendte en webside i stedet for ordrehistorikken. Log ud og ind igen på antalis.dk, og prøv igen.');
+  let lines = text.split(/\r?\n/).filter(l => l.trim().length);
+  if (!lines.length) throw new Error('Ordrehistorikken er tom.');
+  const h = lines.slice(0, 10).findIndex(l => /ordre\s*nummer|order\s*(number|no)/i.test(l));
+  if (h > 0) lines = lines.slice(h);
+  const first = lines[0];
+  const sep = [';', '\t', ','].sort((a, b) => first.split(b).length - first.split(a).length)[0];
+  const norm = s => s.toLowerCase().normalize('NFD').replace(/[^a-zæøå0-9]/g, '');
+  const head = splitCsvLine(first, sep).map(norm);
+  const col = key => { for (const n of COLS[key]) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
+  const C = {}; for (const k of Object.keys(COLS)) C[k] = col(k);
+  if (C.no < 0 || C.item < 0 || C.qty < 0) {
+    const peek = first.slice(0, 160).replace(/\s+/g, ' ');
+    throw new Error('Ordrehistorikken kunne ikke læses (kolonnerne Ordrenummer, Varenummer og Antal blev ikke fundet). Filen starter med: “' + peek + '”');
+  }
   const rows = []; let order = null;
   for (const l of lines.slice(1)) {
-    const r = splitCsvLine(l);
-    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) }; continue; }
+    const r = splitCsvLine(l, sep);
     const item = (r[C.item] || '').trim();
+    // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
+    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date) }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
     rows.push({ order: order.no, date: order.date, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
   }
@@ -149,7 +176,7 @@ function plan(items, today, opts = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const BASE_WORD = it => /ruller/i.test(it.desc) ? 'ruller' : /\bark\b/i.test(it.desc) ? 'ark' : 'stk';
@@ -174,7 +201,10 @@ async function fetchHistory(days) {
   };
   const r = await fetch(WS + 'html/secure/myaccount/orderhistory/exportOrdersHistory', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', Accept: 'application/octet-stream' }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error('Antalis svarede ' + r.status + ' på ordrehistorikken.');
+  // Antalis keeps the shop session longer than the "Min konto" session; then the export redirects to the login page.
+  if (r.redirected && /\/sso\/login/.test(r.url)) { const e = new Error('login'); e.login = true; throw e; }
   const text = new TextDecoder('utf-8').decode(await r.arrayBuffer());
+  if (/^\s*</.test(text)) { const e = new Error('login'); e.login = true; throw e; }
   if (!text.trim()) throw new Error('Antalis sendte en tom ordrehistorik.');
   return text;
 }
@@ -203,6 +233,7 @@ function ui() {
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `<style>
     :host { all: initial }
+    [hidden] { display: none !important }
     .back { position: fixed; inset: 0; background: rgba(20, 22, 24, .45) }
     .win { position: fixed; top: 3vh; left: 50%; transform: translateX(-50%); width: min(1080px, 96vw); max-height: 94vh; display: flex; flex-direction: column; background: #fff; color: #1e2124; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.35); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; overflow: hidden }
     header { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #e3e1da }
@@ -268,7 +299,16 @@ function ui() {
     items = buildItems(rows);
     U.msg('Tjekker kurven…');
     cart = await readCart();
-  } catch (e) { U.msg('Kunne ikke hente data: ' + e.message, true); return; }
+  } catch (e) {
+    if (e.login) {
+      U.msg('');
+      const m = $('.msg'); m.hidden = false; m.className = 'msg err';
+      m.innerHTML = 'Antalis vil have dig til at logge ind igen, før ordrehistorikken kan hentes. Det sker, når man har været logget ind et stykke tid. <br><br><button class="go relogin">Log ind igen</button> <span style="color:#636a70;font-weight:400">Tryk så på bogmærket igen bagefter.</span>';
+      $('.relogin').onclick = () => { location.href = CTX + '/ws/html/secure/myaccount/orderhistory/newOrderHistory'; };
+      return;
+    }
+    U.msg('Kunne ikke hente data: ' + e.message, true); return;
+  }
 
   let horizon = 7, showAll = false;
   const picks = new Map();

@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const BASE_WORD = it => /ruller/i.test(it.desc) ? 'ruller' : /\bark\b/i.test(it.desc) ? 'ark' : 'stk';
@@ -25,7 +25,10 @@ async function fetchHistory(days) {
   };
   const r = await fetch(WS + 'html/secure/myaccount/orderhistory/exportOrdersHistory', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', Accept: 'application/octet-stream' }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error('Antalis svarede ' + r.status + ' på ordrehistorikken.');
+  // Antalis keeps the shop session longer than the "Min konto" session; then the export redirects to the login page.
+  if (r.redirected && /\/sso\/login/.test(r.url)) { const e = new Error('login'); e.login = true; throw e; }
   const text = new TextDecoder('utf-8').decode(await r.arrayBuffer());
+  if (/^\s*</.test(text)) { const e = new Error('login'); e.login = true; throw e; }
   if (!text.trim()) throw new Error('Antalis sendte en tom ordrehistorik.');
   return text;
 }
@@ -54,6 +57,7 @@ function ui() {
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `<style>
     :host { all: initial }
+    [hidden] { display: none !important }
     .back { position: fixed; inset: 0; background: rgba(20, 22, 24, .45) }
     .win { position: fixed; top: 3vh; left: 50%; transform: translateX(-50%); width: min(1080px, 96vw); max-height: 94vh; display: flex; flex-direction: column; background: #fff; color: #1e2124; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.35); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; overflow: hidden }
     header { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #e3e1da }
@@ -119,7 +123,16 @@ function ui() {
     items = buildItems(rows);
     U.msg('Tjekker kurven…');
     cart = await readCart();
-  } catch (e) { U.msg('Kunne ikke hente data: ' + e.message, true); return; }
+  } catch (e) {
+    if (e.login) {
+      U.msg('');
+      const m = $('.msg'); m.hidden = false; m.className = 'msg err';
+      m.innerHTML = 'Antalis vil have dig til at logge ind igen, før ordrehistorikken kan hentes. Det sker, når man har været logget ind et stykke tid. <br><br><button class="go relogin">Log ind igen</button> <span style="color:#636a70;font-weight:400">Tryk så på bogmærket igen bagefter.</span>';
+      $('.relogin').onclick = () => { location.href = CTX + '/ws/html/secure/myaccount/orderhistory/newOrderHistory'; };
+      return;
+    }
+    U.msg('Kunne ikke hente data: ' + e.message, true); return;
+  }
 
   let horizon = 7, showAll = false;
   const picks = new Map();
