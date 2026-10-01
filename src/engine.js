@@ -163,7 +163,13 @@ function plan(items, today, opts = {}) {
       }
     }
     it.counted = count || null;
-    it.stockNow = Math.max(0, stock - it.rate * Math.max(0, today - t) / DAY);
+    // Stock on the shelf today: same walk, but only deliveries that have arrived.
+    let s2 = count ? count.base : 0, t2 = count ? count.at : null;
+    for (const e of arrivals.filter(e => e.at <= today && (!count || e.at > count.at))) {
+      if (t2 !== null) s2 = Math.max(0, s2 - it.rate * (e.at - t2) / DAY);
+      s2 += e.base; t2 = e.at;
+    }
+    it.stockNow = t2 === null ? 0 : Math.max(0, s2 - it.rate * Math.max(0, today - t2) / DAY);
     const runout = t + (stock / it.rate) * DAY;
     const orderBy = prevWeekday(runout - (it.lead + buffer) * DAY);
     const f = it.factors[it.orderUnit] || 1;

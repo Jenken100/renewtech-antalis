@@ -166,7 +166,13 @@ function plan(items, today, opts = {}) {
       }
     }
     it.counted = count || null;
-    it.stockNow = Math.max(0, stock - it.rate * Math.max(0, today - t) / DAY);
+    // Stock on the shelf today: same walk, but only deliveries that have arrived.
+    let s2 = count ? count.base : 0, t2 = count ? count.at : null;
+    for (const e of arrivals.filter(e => e.at <= today && (!count || e.at > count.at))) {
+      if (t2 !== null) s2 = Math.max(0, s2 - it.rate * (e.at - t2) / DAY);
+      s2 += e.base; t2 = e.at;
+    }
+    it.stockNow = t2 === null ? 0 : Math.max(0, s2 - it.rate * Math.max(0, today - t2) / DAY);
     const runout = t + (stock / it.rate) * DAY;
     const orderBy = prevWeekday(runout - (it.lead + buffer) * DAY);
     const f = it.factors[it.orderUnit] || 1;
@@ -193,7 +199,7 @@ function yearPlan(it, today, days = 365) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
