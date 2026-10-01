@@ -3,6 +3,7 @@
 "use strict";
 // Antalis order-history engine: parse export, normalise units, forecast next order.
 const DAY = 86400000;
+const GROWTH_MIN = 0.95, GROWTH_MAX = 1.05; // steady growth only: at most ±5 % a month
 const UNIT_DA = { 'Unit(s)': 'stk', 'Bundle(s)': 'bundt', 'Pallet(s)': 'palle', 'Carton(s)': 'kasse', 'Pack(s)': 'pakke', 'Reel(s)': 'rulle', 'Box(es)': 'æske', 'Set(s)': 'sæt' };
 // Sales units read from antalis.dk product pages on 2026-10-01 (desc -> base units per sales unit).
 const LIVE_UNITS = {
@@ -162,11 +163,11 @@ function plan(items, today, opts = {}) {
     const older = it.events.filter(e => e.date < today - 60 * DAY), recentBase = it.events.filter(e => e.date >= today - 60 * DAY).reduce((s, e) => s + e.base, 0);
     const olderSpan = older.length ? (today - 60 * DAY - older[0].date) / DAY : 0;
     const baseRate = olderSpan >= 60 ? older.reduce((s, e) => s + e.base, 0) / olderSpan : NaN;
-    // Natural growth: compare 300-180 days ago with 180-60 days ago, as growth per month, kept within -15 % / +15 %.
+    // Natural growth: compare 300-180 days ago with 180-60 days ago, as growth per month, kept within a steady -5 % / +5 % (about +80 % a year at most).
     // The expected pace today is the later window carried forward three months at that growth.
     const sumIn = (a, b) => it.events.filter(e => e.date >= today - a * DAY && e.date < today - b * DAY).reduce((s, e) => s + e.base, 0);
     const w1 = sumIn(300, 180) / 120, w2 = sumIn(180, 60) / 120;
-    const monthly = w1 > 0 && w2 > 0 ? Math.min(1.15, Math.max(0.85, Math.pow(w2 / w1, 30 / 120))) : 1;
+    const monthly = w1 > 0 && w2 > 0 ? Math.min(GROWTH_MAX, Math.max(GROWTH_MIN, Math.pow(w2 / w1, 30 / 120))) : 1;
     const expected = w2 > 0 ? w2 * Math.pow(monthly, 3) : baseRate;
     it.trend = w1 > 0 && w2 > 0 ? monthly : null;
     // One ordinary order inside the window is not overbuying, so compare with the larger of 60 days' pace and a normal order.
@@ -279,10 +280,9 @@ function defaultClosed(today, cfg = {}) {
 }
 
 
-
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.12';
+const APP_VERSION = '1.13';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
