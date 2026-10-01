@@ -46,7 +46,9 @@ const COLS = {
   desc: ['beskrivelse', 'description'],
   deliv: ['leveringsdato', 'deliverydate'],
   qty: ['antal', 'quantity', 'qty'],
-  unit: ['enhed', 'unit']
+  unit: ['enhed', 'unit'],
+  ref: ['minordrereference', 'myorderreference', 'ordrereference'],
+  user: ['brugernavn', 'username']
 };
 
 function parseExport(text) {
@@ -71,9 +73,9 @@ function parseExport(text) {
     const r = splitCsvLine(l, sep);
     const item = (r[C.item] || '').trim();
     // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
-    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date) }; if (!item) continue; }
+    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date), ref: (r[C.ref] || '').trim(), user: (r[C.user] || '').trim() }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
-    rows.push({ order: order.no, date: order.date, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
+    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
   }
   return rows;
 }

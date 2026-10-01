@@ -49,7 +49,9 @@ const COLS = {
   desc: ['beskrivelse', 'description'],
   deliv: ['leveringsdato', 'deliverydate'],
   qty: ['antal', 'quantity', 'qty'],
-  unit: ['enhed', 'unit']
+  unit: ['enhed', 'unit'],
+  ref: ['minordrereference', 'myorderreference', 'ordrereference'],
+  user: ['brugernavn', 'username']
 };
 
 function parseExport(text) {
@@ -74,9 +76,9 @@ function parseExport(text) {
     const r = splitCsvLine(l, sep);
     const item = (r[C.item] || '').trim();
     // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
-    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date) }; if (!item) continue; }
+    if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date), ref: (r[C.ref] || '').trim(), user: (r[C.user] || '').trim() }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
-    rows.push({ order: order.no, date: order.date, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
+    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
   }
   return rows;
 }
@@ -264,7 +266,7 @@ function defaultClosed(today, cfg = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.10';
+const APP_VERSION = '1.11';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -375,6 +377,7 @@ function ui() {
     .year ul { margin: 0; padding-left: 18px } .year li { margin: 2px 0 } .year .late { color: #b3261e; font-weight: 600 }
     .stockp { padding: 10px 18px 14px } .stockp input { width: 70px; font: 600 14px Consolas, monospace; padding: 5px 7px; border: 1px solid #d9d7d0; border-radius: 6px; text-align: right }
     .stockp p { margin: 0 0 10px; color: #636a70 }
+    .ordered { padding: 6px 18px 14px } .ordered h4 { margin: 14px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #636a70 } .ordered ul { margin: 0; padding-left: 18px } .ordered .late { color: #b3261e; font-weight: 600 }
     .save { background: #1e2124; color: #fff; border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px }
     .warn { padding: 10px 18px; background: #fbefd6; color: #8a5a00; border-bottom: 1px solid #ecdcb4 }
     .warn button { margin-left: 8px; border: 1px solid #8a5a00; background: #fff; color: #8a5a00; border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
@@ -387,7 +390,7 @@ function ui() {
       <div class="seg"><button data-h="7" aria-pressed="true">7 dage</button><button data-h="14" aria-pressed="false">14 dage</button><button data-h="30" aria-pressed="false">30 dage</button></div>
       <label class="all"><input type="checkbox" class="showall"> Vis alle varer</label>
       <span class="spacer"></span>
-      <div class="seg views"><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="stock" aria-pressed="false">Lager</button></div>
+      <div class="seg views"><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="ordered" aria-pressed="false">Bestilt</button><button data-v="stock" aria-pressed="false">Lager</button></div>
     </div>
     <div class="next" hidden></div>
     <div class="long" hidden></div>
@@ -395,6 +398,7 @@ function ui() {
     <div class="msg">Starter…</div>
     <div class="scroll year" hidden></div>
     <div class="scroll stockp" hidden></div>
+    <div class="scroll ordered" hidden></div>
     <div class="scroll main"><table hidden><thead><tr><th></th><th>Varenr.</th><th>Vare og udregning</th><th>Status</th><th>Bestil senest</th><th style="text-align:right">Antal</th><th>Kurv</th></tr></thead><tbody></tbody></table></div>
     <footer hidden><button class="go">Læg valgte i kurven</button><a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a><span class="sum"></span></footer>
   </div>`;
@@ -411,7 +415,7 @@ function ui() {
   const U = ui(), $ = U.$;
   if (!document.querySelector('.header__login-name')) { U.msg('Du er ikke logget ind. Log ind på antalis.dk, og tryk på bogmærket igen.', true); return; }
 
-  let items, cart, histAt = Date.now(), fromCache = false;
+  let items, cart, allRows = [], histAt = Date.now(), fromCache = false;
   const relogin = () => { location.href = CTX + '/ws/html/secure/myaccount/orderhistory/newOrderHistory'; };
   try {
     U.msg('Henter jeres ordrehistorik fra Antalis (12 måneder)…');
@@ -427,6 +431,7 @@ function ui() {
       text = cached.csv; histAt = cached.at; fromCache = true;
     }
     const rows = parseExport(text);
+    allRows = rows;
     // Items this tool put in the cart after the history was fetched count as ordered, so they are not suggested twice.
     const sent = LS.get(SENT_KEY) || {};
     for (const [code, s] of Object.entries(sent)) {
@@ -492,8 +497,8 @@ function ui() {
       $('.next').innerHTML = `Næste bestilling: ${when(d0)} · ${names(g1)}` + (d1 ? `<br><span>Derefter: ${when(d1)} · ${names(g2)}</span>` : '');
     } else $('.next').hidden = true;
     $('.bar').hidden = false;
-    $('.main').hidden = view !== 'list'; $('.year').hidden = view !== 'year'; $('.stockp').hidden = view !== 'stock';
-    if (view !== 'list') { $('footer').hidden = true; $('.msg').hidden = true; return view === 'year' ? renderYear() : renderStock(); }
+    $('.main').hidden = view !== 'list'; $('.year').hidden = view !== 'year'; $('.stockp').hidden = view !== 'stock'; $('.ordered').hidden = view !== 'ordered';
+    if (view !== 'list') { $('footer').hidden = true; $('.msg').hidden = true; return view === 'year' ? renderYear() : view === 'ordered' ? renderOrdered() : renderStock(); }
     const list = items.filter(it => it.plan && (showAll || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
     $('.bar').hidden = false;
     $('.main table').hidden = !list.length;
@@ -570,6 +575,42 @@ function ui() {
         }).join('');
         return `<h4>${month(k)} · ${list.length} bestillinger af ${per.size} varer</h4><ul>${rows}</ul>`;
       }).join('');
+  }
+
+
+  // Ordered view: the cart now, what is on its way from Antalis, and what was ordered in the last 14 days.
+  function renderOrdered() {
+    const name = code => { const it = items.find(i => i.code === code); return it ? it.title.slice(0, 70) : ''; };
+    const qtyTxt = (q, u) => `${fmtNum(q)} ${esc(UNIT_DA[u] ? unitDa(u, q) : u)}`;
+    const real = allRows.filter(r => !r.sent);
+    const open = real.filter(r => r.status && r.status !== 'Faktureret');
+    const recent = real.filter(r => r.status === 'Faktureret' && r.date >= todayUTC - 14 * DAY);
+    const byOrder = rows => {
+      const m = new Map();
+      for (const r of rows) { if (!m.has(r.order)) m.set(r.order, []); m.get(r.order).push(r); }
+      return [...m.values()];
+    };
+    const orderHtml = (lines, showDeliv) => {
+      const o = lines[0];
+      const head = `<b>#${esc(o.order)}</b> · bestilt ${fmtDate(o.date)}${o.ref ? ' · ref. ' + esc(o.ref) : ''}${o.user ? ' · ' + esc(o.user) : ''}`;
+      const li = lines.map(r => {
+        const late = showDeliv && r.deliv && r.deliv < todayUTC;
+        const when = !showDeliv ? (r.deliv ? 'leveret ' + fmtDate(r.deliv) : '') : r.deliv ? (late ? `<span class="late">forventet ${fmtDate(r.deliv)} (overskredet)</span>` : `forventet <b>${fmtDate(r.deliv)}</b> (om ${Math.max(0, Math.round((r.deliv - todayUTC) / DAY))} d)`) : 'leveringsdato ikke oplyst';
+        return `<li><b>${qtyTxt(r.qty, r.unit)}</b> · ${esc(r.item)} ${esc(name(r.item))} · <span style="color:#636a70">${esc(r.status)}</span> · ${when}</li>`;
+      }).join('');
+      return `<div style="margin:8px 0">${head}<ul>${li}</ul></div>`;
+    };
+    const cartList = Object.entries(cart);
+    const openOrders = byOrder(open).sort((a, b) => Math.min(...a.map(r => r.deliv || Infinity)) - Math.min(...b.map(r => r.deliv || Infinity)));
+    const recentOrders = byOrder(recent).sort((a, b) => b[0].date - a[0].date);
+    $('.ordered').innerHTML = `
+      <h4>I kurven nu · ${cartList.length} varer</h4>
+      ${cartList.length ? '<ul>' + cartList.map(([code, c]) => `<li><b>${qtyTxt(c.qty, c.unit)}</b> · ${esc(code)} ${esc(name(code))}</li>`).join('') + `</ul><p style="color:#636a70;margin:4px 0 0">Ikke bestilt endnu. <a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a> for at bestille.</p>` : '<p style="color:#636a70">Kurven er tom.</p>'}
+      <h4>På vej fra Antalis · ${open.length} linjer i ${openOrders.length} ordrer</h4>
+      ${openOrders.length ? openOrders.map(l => orderHtml(l, true)).join('') : '<p style="color:#636a70">Intet på vej.</p>'}
+      <h4>Leveret de sidste 14 dage · ${recentOrders.length} ordrer</h4>
+      ${recentOrders.length ? recentOrders.map(l => orderHtml(l, false)).join('') : '<p style="color:#636a70">Ingen.</p>'}
+      <p style="color:#636a70;margin-top:12px">Bygger på ordrehistorikken hentet ${fmtTime(histAt)}${fromCache ? ' (gemt kopi, fordi “Min konto” har logget dig ud)' : ''}.</p>`;
   }
 
   // Stock view: pallets on the shelf for your own boxes; the plan then counts from this instead of guessing.
