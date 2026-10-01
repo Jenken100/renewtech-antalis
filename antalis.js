@@ -152,11 +152,21 @@ function plan(items, today, opts = {}) {
     it.plan = null;
     if (it.orders < 2 || !(it.rate > 0)) { it.state = 'single'; continue; }
     // Simulate stock: each order arrives on its delivery date, usage runs at a constant rate.
+    // A stock count (opts.stock[code] = { base, at }) replaces the history before the count; later arrivals are added on top.
+    const count = opts.stock && opts.stock[it.code];
+    const arrivals = [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at);
     let stock = 0, t = null;
-    for (const e of [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at)) {
-      if (t !== null) stock = Math.max(0, stock - it.rate * (e.at - t) / DAY);
-      stock += e.base; t = e.at;
+    if (count) {
+      stock = count.base; t = count.at;
+      for (const e of arrivals.filter(e => e.at > count.at)) { stock = Math.max(0, stock - it.rate * (e.at - t) / DAY) + e.base; t = e.at; }
+    } else {
+      for (const e of arrivals) {
+        if (t !== null) stock = Math.max(0, stock - it.rate * (e.at - t) / DAY);
+        stock += e.base; t = e.at;
+      }
     }
+    it.counted = count || null;
+    it.stockNow = Math.max(0, stock - it.rate * Math.max(0, today - t) / DAY);
     const runout = t + (stock / it.rate) * DAY;
     const orderBy = prevWeekday(runout - (it.lead + buffer) * DAY);
     const f = it.factors[it.orderUnit] || 1;
@@ -172,11 +182,18 @@ function plan(items, today, opts = {}) {
   return items;
 }
 
+// Future order dates for one item over the next `days`: first the order-by date, then one typical order each time the previous one is used up.
+function yearPlan(it, today, days = 365) {
+  if (!it.plan || it.inactive || !(it.rate > 0)) return [];
+  const out = [], cover = Math.max(7, it.plan.base / it.rate) * DAY;
+  for (let t = it.plan.orderBy; t < today + days * DAY && out.length < 60; t += cover) out.push({ at: Math.max(t, today), qty: it.plan.qty, unit: it.plan.unit, late: t < today });
+  return out;
+}
 
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -188,7 +205,9 @@ const LS = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
 };
-const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt';
+const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager';
+// Stock counts: { code: { pallets, per, at } } in this browser; the engine wants base units.
+const stockOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.pallets >= 0 && v.per > 0) o[k] = { base: v.pallets * v.per, at: v.at }; return o; };
 const fmtTime = t => new Date(t).toLocaleString('da-DK', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDate = t => new Date(t).toLocaleDateString('da-DK', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const fmtNum = n => Math.round(n).toLocaleString('da-DK');
@@ -274,6 +293,14 @@ function ui() {
     .go[disabled] { opacity: .5; cursor: default }
     a.cart { color: #9a6a35; font-weight: 600 }
     label.all { display: inline-flex; gap: 6px; align-items: center; cursor: pointer }
+    .spacer { flex: 1 }
+    .next { padding: 10px 18px; background: #e1ebf6; color: #1e3a5a; border-bottom: 1px solid #c9d8ea }
+    .next span { color: #2d5b8a }
+    .year { padding: 6px 18px 14px } .year h4 { margin: 14px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #636a70 }
+    .year ul { margin: 0; padding-left: 18px } .year li { margin: 2px 0 } .year .late { color: #b3261e; font-weight: 600 }
+    .stockp { padding: 10px 18px 14px } .stockp input { width: 70px; font: 600 14px Consolas, monospace; padding: 5px 7px; border: 1px solid #d9d7d0; border-radius: 6px; text-align: right }
+    .stockp p { margin: 0 0 10px; color: #636a70 }
+    .save { background: #1e2124; color: #fff; border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px }
     .warn { padding: 10px 18px; background: #fbefd6; color: #8a5a00; border-bottom: 1px solid #ecdcb4 }
     .warn button { margin-left: 8px; border: 1px solid #8a5a00; background: #fff; color: #8a5a00; border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
   </style>
@@ -284,10 +311,15 @@ function ui() {
       <span>Vis varer der skal bestilles inden for</span>
       <div class="seg"><button data-h="7" aria-pressed="true">7 dage</button><button data-h="14" aria-pressed="false">14 dage</button><button data-h="30" aria-pressed="false">30 dage</button></div>
       <label class="all"><input type="checkbox" class="showall"> Vis alle varer</label>
+      <span class="spacer"></span>
+      <div class="seg views"><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="stock" aria-pressed="false">Lager</button></div>
     </div>
+    <div class="next" hidden></div>
     <div class="warn" hidden></div>
     <div class="msg">Starter…</div>
-    <div class="scroll"><table hidden><thead><tr><th></th><th>Varenr.</th><th>Vare og udregning</th><th>Status</th><th>Bestil senest</th><th style="text-align:right">Antal</th><th>Kurv</th></tr></thead><tbody></tbody></table></div>
+    <div class="scroll year" hidden></div>
+    <div class="scroll stockp" hidden></div>
+    <div class="scroll main"><table hidden><thead><tr><th></th><th>Varenr.</th><th>Vare og udregning</th><th>Status</th><th>Bestil senest</th><th style="text-align:right">Antal</th><th>Kurv</th></tr></thead><tbody></tbody></table></div>
     <footer hidden><button class="go">Læg valgte i kurven</button><a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a><span class="sum"></span></footer>
   </div>`;
   document.body.appendChild(host);
@@ -360,11 +392,26 @@ function ui() {
   const why = it => {
     const bw = BASE_WORD(it), week = it.rate * 7;
     const lastQty = it.last.base, f = it.factors[it.plan.unit] || 1;
+    const s = (LS.get(STOCK_KEY) || {})[it.code];
+    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · bruger ca. ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · lev.tid ${it.lead} d · løber tør ca. ${fmtDate(it.plan.runout)}`;
     return `Bruger ca. ${week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ',')} ${bw}/uge · sidst bestilt ${fmtDate(it.last.date)} (${fmtNum(lastQty)} ${bw}) · lev.tid ${it.lead} d · løber tør ca. ${fmtDate(it.plan.runout)}` + (f > 1 ? '' : '');
   };
 
   const render = () => {
-    plan(items, todayUTC, { horizon });
+    plan(items, todayUTC, { horizon, stock: stockOpts() });
+    // When is the next order? Group items whose order-by dates fall within 3 days of the earliest.
+    const due = items.filter(it => it.plan && !it.inactive && !cart[it.code] && !it.sentAfter && it.orders >= 3 || (it.plan && it.counted && !cart[it.code])).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
+    if (due.length) {
+      const d0 = due[0].plan.orderBy, g1 = due.filter(it => it.plan.orderBy <= d0 + 3 * DAY);
+      const rest = due.filter(it => it.plan.orderBy > d0 + 3 * DAY), d1 = rest.length ? rest[0].plan.orderBy : null, g2 = d1 ? rest.filter(it => it.plan.orderBy <= d1 + 3 * DAY) : [];
+      const names = g => g.slice(0, 4).map(it => esc(it.code + ' ' + it.title.split(',')[0].slice(0, 28))).join(', ') + (g.length > 4 ? ` og ${g.length - 4} mere` : '');
+      const when = t => t <= todayUTC ? '<b>nu</b>' : `senest <b>${fmtDate(t)}</b>`;
+      $('.next').hidden = false;
+      $('.next').innerHTML = `Næste bestilling: ${when(d0)} · ${names(g1)}` + (d1 ? `<br><span>Derefter: ${when(d1)} · ${names(g2)}</span>` : '');
+    } else $('.next').hidden = true;
+    $('.bar').hidden = false;
+    $('.main').hidden = view !== 'list'; $('.year').hidden = view !== 'year'; $('.stockp').hidden = view !== 'stock';
+    if (view !== 'list') { $('footer').hidden = true; $('.msg').hidden = true; return view === 'year' ? renderYear() : renderStock(); }
     const list = items.filter(it => it.plan && (showAll || (it.plan.daysLeft <= horizon && !it.inactive) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
     $('.bar').hidden = false;
     $('table').hidden = !list.length;
@@ -406,6 +453,58 @@ function ui() {
     picks.clear(); render();
   });
   $('.showall').onchange = e => { showAll = e.target.checked; render(); };
+
+  let view = 'list';
+  const setView = v => { view = v; U.root.querySelectorAll('[data-v]').forEach(x => x.setAttribute('aria-pressed', x.dataset.v === v)); render(); };
+  U.root.querySelectorAll('[data-v]').forEach(b => b.onclick = () => setView(b.dataset.v));
+
+  // Year view: expected orders over the next 12 months, grouped by month.
+  function renderYear() {
+    const ev = [];
+    for (const it of items) for (const o of yearPlan(it, todayUTC)) ev.push(Object.assign({ it }, o));
+    ev.sort((a, b) => a.at - b.at);
+    const byMonth = new Map();
+    for (const e of ev) { const d = new Date(e.at), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byMonth.has(k)) byMonth.set(k, []); byMonth.get(k).push(e); }
+    const month = k => new Date(Date.UTC(Math.floor(k / 12), k % 12, 1)).toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    $('.year').innerHTML = !ev.length ? '<p>Ingen varer med nok køb til en årsplan.</p>'
+      : '<p style="color:#636a70;margin:8px 0">Forventede bestillinger de næste 12 måneder med det typiske antal. Datoerne flytter sig, når I bestiller, eller når forbruget ændrer sig. Indtast lager under “Lager” for jeres egne kasser.</p>'
+      + [...byMonth].map(([k, list]) => {
+        const per = new Map();
+        for (const e of list) { if (!per.has(e.it.code)) per.set(e.it.code, []); per.get(e.it.code).push(e); }
+        const rows = [...per.values()].sort((a, b) => a[0].at - b[0].at).map(es => {
+          const e = es[0], it = e.it, late = es.some(x => x.late);
+          const days = es.map(x => x.late ? 'nu' : new Date(x.at).getUTCDate() + '.').join(', ');
+          return `<li class="${late ? 'late' : ''}"><b>${es.length > 1 ? es.length + ' × ' : ''}${e.qty} ${esc(unitDa(e.unit, e.qty))}</b> · ${esc(it.code)} ${esc(it.title.slice(0, 60))} <span style="color:#636a70">(${days})</span>${it.plan.lowData ? ' <span class="pill plain">få køb</span>' : ''}${it.counted ? ' <span class="pill info">lager talt</span>' : ''}${it.unique ? ' <span class="pill uniq">kundeunik</span>' : ''}</li>`;
+        }).join('');
+        return `<h4>${month(k)} · ${list.length} bestillinger af ${per.size} varer</h4><ul>${rows}</ul>`;
+      }).join('');
+  }
+
+  // Stock view: pallets on the shelf for your own boxes; the plan then counts from this instead of guessing.
+  const defPer = it => (!it.assumed.includes('Pallet(s)') && it.factors['Pallet(s)']) || Math.round(it.typicalBase) || 250;
+  function renderStock() {
+    const s = LS.get(STOCK_KEY) || {};
+    const list = items.filter(it => it.unique || !it.desc || s[it.code]).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'da'));
+    $('.stockp').innerHTML = `<p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Tallene gemmes i denne browser.</p>
+      <table><thead><tr><th>Varenr.</th><th>Vare</th><th style="text-align:right">Paller nu</th><th style="text-align:right">Stk pr. palle</th><th>Sidst talt</th></tr></thead><tbody>${list.map(it => {
+        const v = s[it.code] || {};
+        return `<tr data-code="${esc(it.code)}"><td class="code">${esc(it.code)}</td><td>${esc(it.title.slice(0, 70))}${it.orders < 2 ? '<span class="why">Kun købt én gang i perioden: forbruget kan ikke regnes endnu</span>' : ''}</td>
+          <td class="qty"><input class="pal" type="number" min="0" step="0.5" value="${v.pallets ?? ''}"></td>
+          <td class="qty"><input class="per" type="number" min="1" value="${v.per || defPer(it)}"></td>
+          <td>${v.at ? fmtDate(v.at) : ''}</td></tr>`;
+      }).join('')}</tbody></table><button class="save">Gem lager og regn igen</button>`;
+    $('.stockp .save').onclick = () => {
+      const s2 = LS.get(STOCK_KEY) || {};
+      $('.stockp').querySelectorAll('tr[data-code]').forEach(tr => {
+        const code = tr.dataset.code, palRaw = tr.querySelector('.pal').value, per = +tr.querySelector('.per').value;
+        if (palRaw === '') { delete s2[code]; return; }
+        const pallets = +String(palRaw).replace(',', '.'), old = s2[code];
+        s2[code] = { pallets, per: per > 0 ? per : 250, at: old && old.pallets === pallets && old.per === per ? old.at : Date.now() };
+      });
+      LS.set(STOCK_KEY, s2);
+      picks.clear(); setView('list');
+    };
+  }
 
   $('.go').onclick = async () => {
     const todo = chosen(); if (!todo.length) return;

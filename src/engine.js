@@ -149,11 +149,21 @@ function plan(items, today, opts = {}) {
     it.plan = null;
     if (it.orders < 2 || !(it.rate > 0)) { it.state = 'single'; continue; }
     // Simulate stock: each order arrives on its delivery date, usage runs at a constant rate.
+    // A stock count (opts.stock[code] = { base, at }) replaces the history before the count; later arrivals are added on top.
+    const count = opts.stock && opts.stock[it.code];
+    const arrivals = [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at);
     let stock = 0, t = null;
-    for (const e of [...it.events].map(e => ({ at: e.deliv || e.date + it.lead * DAY, base: e.base })).sort((a, b) => a.at - b.at)) {
-      if (t !== null) stock = Math.max(0, stock - it.rate * (e.at - t) / DAY);
-      stock += e.base; t = e.at;
+    if (count) {
+      stock = count.base; t = count.at;
+      for (const e of arrivals.filter(e => e.at > count.at)) { stock = Math.max(0, stock - it.rate * (e.at - t) / DAY) + e.base; t = e.at; }
+    } else {
+      for (const e of arrivals) {
+        if (t !== null) stock = Math.max(0, stock - it.rate * (e.at - t) / DAY);
+        stock += e.base; t = e.at;
+      }
     }
+    it.counted = count || null;
+    it.stockNow = Math.max(0, stock - it.rate * Math.max(0, today - t) / DAY);
     const runout = t + (stock / it.rate) * DAY;
     const orderBy = prevWeekday(runout - (it.lead + buffer) * DAY);
     const f = it.factors[it.orderUnit] || 1;
@@ -169,4 +179,12 @@ function plan(items, today, opts = {}) {
   return items;
 }
 
-if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, UNIT_DA, DAY };
+// Future order dates for one item over the next `days`: first the order-by date, then one typical order each time the previous one is used up.
+function yearPlan(it, today, days = 365) {
+  if (!it.plan || it.inactive || !(it.rate > 0)) return [];
+  const out = [], cover = Math.max(7, it.plan.base / it.rate) * DAY;
+  for (let t = it.plan.orderBy; t < today + days * DAY && out.length < 60; t += cover) out.push({ at: Math.max(t, today), qty: it.plan.qty, unit: it.plan.unit, late: t < today });
+  return out;
+}
+
+if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, UNIT_DA, DAY };
