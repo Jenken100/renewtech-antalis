@@ -136,6 +136,8 @@ function plan(items, today, opts = {}) {
     const qty = Math.max(1, Math.ceil(it.typicalBase / f - 1e-9));
     const daysLeft = Math.round((orderBy - today) / DAY);
     it.state = daysLeft <= 0 ? 'now' : daysLeft <= horizon ? 'soon' : 'ok';
+    // Not bought for far longer than usual: probably replaced or no longer used.
+    it.inactive = (today - it.last.date) / DAY > Math.max(60, 3 * (it.every || 0));
     const open = it.events.filter(e => e.open && e.deliv && e.deliv >= today);
     it.onTheWay = open.length ? Math.max(...open.map(e => e.deliv)) : null;
     it.plan = { runout, orderBy, daysLeft, qty, unit: it.orderUnit, base: qty * f, lowData: it.orders < 3 };
@@ -147,7 +149,7 @@ function plan(items, today, opts = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const BASE_WORD = it => /ruller/i.test(it.desc) ? 'ruller' : /\bark\b/i.test(it.desc) ? 'ark' : 'stk';
@@ -271,11 +273,12 @@ function ui() {
   let horizon = 7, showAll = false;
   const picks = new Map();
   const pickFor = it => {
-    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && it.orders >= 3 && !(it.onTheWay && it.state !== 'now') && it.plan.daysLeft <= horizon, qty: it.plan.qty });
+    if (!picks.has(it.code)) picks.set(it.code, { on: !cart[it.code] && !it.inactive && it.orders >= 3 && !(it.onTheWay && it.state !== 'now') && it.plan.daysLeft <= horizon, qty: it.plan.qty });
     return picks.get(it.code);
   };
   const statusPill = it => {
     const p = it.plan;
+    if (it.inactive) return `<span class="pill plain">Ikke købt siden ${fmtDate(it.last.date)}</span>`;
     if (it.state === 'now') return `<span class="pill now">${p.daysLeft < 0 ? 'Bestil nu · ' + -p.daysLeft + ' dage over' : 'Bestil i dag'}</span>`;
     if (it.state === 'soon') return `<span class="pill soon">Bestil inden ${fmtDate(p.orderBy)}</span>`;
     return `<span class="pill ok">OK til ${fmtDate(p.orderBy)}</span>`;
@@ -288,11 +291,12 @@ function ui() {
 
   const render = () => {
     plan(items, todayUTC, { horizon });
-    const list = items.filter(it => it.plan && (showAll || it.plan.daysLeft <= horizon || cart[it.code])).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
+    const list = items.filter(it => it.plan && (showAll || (it.plan.daysLeft <= horizon && !it.inactive) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
     $('.bar').hidden = false;
     $('table').hidden = !list.length;
     $('footer').hidden = !list.length;
-    U.msg(list.length ? '' : `Intet skal bestilles inden for ${horizon} dage.`);
+    const next = items.filter(it => it.plan && !it.inactive && it.plan.daysLeft > horizon).sort((a, b) => a.plan.orderBy - b.plan.orderBy)[0];
+    U.msg(list.length ? '' : `Intet skal bestilles inden for ${horizon} dage.` + (next ? ` Næste er ${next.code} (${next.title.slice(0, 40)}) senest ${fmtDate(next.plan.orderBy)}.` : ''));
     $('tbody').innerHTML = list.map(it => {
       const p = pickFor(it), f = it.factors[it.plan.unit] || 1, c = cart[it.code];
       const flags = [
