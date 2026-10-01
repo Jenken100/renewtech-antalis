@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antalis-bestilling</title>
+<style>
+  :root { --bg: #f5f4f1; --fg: #1e2124; --muted: #636a70; --kraft: #9a6a35; --line: #d9d7d0; --card: #fff }
+  @media (prefers-color-scheme: dark) { :root { --bg: #16181a; --fg: #e8e6e1; --muted: #9ea4a9; --kraft: #d19a5c; --line: #353a3f; --card: #1f2225 } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 "Segoe UI", system-ui, sans-serif }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 16px 64px; display: grid; gap: 24px }
+  h1 { margin: 0; font-size: 28px }
+  p { margin: 0 }
+  .muted { color: var(--muted) }
+  ol { margin: 0; padding-left: 22px; display: grid; gap: 10px }
+  .bm { display: inline-block; padding: 12px 18px; border: 2px dashed var(--kraft); border-radius: 10px; color: var(--kraft); font-weight: 700; text-decoration: none; cursor: grab }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: grid; gap: 12px }
+  textarea { width: 100%; box-sizing: border-box; font: 12px/1.4 Consolas, monospace; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg) }
+  kbd { font-family: Consolas, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <p class="muted">Renewtech · Indkøb</p>
+    <h1>Antalis-bestilling</h1>
+  </div>
+  <p>Et bogmærke til antalis.dk. Når du er logget ind og trykker på det, henter det jeres ordrehistorik, regner ud hvad der skal bestilles og hvor meget, og lægger varerne i kurven. Du bestiller selv i kurven.</p>
+
+  <div class="card">
+    <b>Læg bogmærket på favoritlinjen (én gang)</b>
+    <p>Træk knappen op på favoritlinjen. Viser Edge ikke linjen, så tryk <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>.</p>
+    <p><a class="bm" id="bm" href="#">Antalis-bestilling</a></p>
+    <details>
+      <summary>Kan den ikke trækkes?</summary>
+      <p style="margin:8px 0">Kopiér teksten herunder. Tryk <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> → Tilføj favorit, og sæt teksten ind som URL.</p>
+      <textarea id="code" rows="3" readonly></textarea>
+    </details>
+  </div>
+
+  <div class="card">
+    <b>Sådan bestiller du</b>
+    <ol>
+      <li>Log ind på <a href="https://www.antalis.dk/eshop/home">antalis.dk</a>.</li>
+      <li>Tryk på <b>Antalis-bestilling</b> på favoritlinjen.</li>
+      <li>Se listen: hver vare viser forbrug pr. uge, hvornår den sidst blev bestilt, leveringstid og hvornår den skal bestilles senest. Ret antal, eller fjern fluebenet.</li>
+      <li>Tryk <b>Læg valgte i kurven</b>. Hver vare får ✓, når den er i kurven.</li>
+      <li>Gå til kurven, sæt ordrereference, og bestil som normalt.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <b>Sådan undgår vi dobbeltbestilling</b>
+    <p>Bogmærket henter ordrehistorikken direkte fra Antalis hver gang, også ordrer lagt for et minut siden. En vare, der lige er bestilt, regnes derfor som dækket. Varer, der allerede ligger i kurven, bliver ikke lagt i igen. Varer på vej fra Antalis er markeret “På vej”.</p>
+  </div>
+
+  <p class="muted">Koden kører kun i din egen browser, mens du er logget ind på antalis.dk. Den indeholder ingen priser, ordredata eller adgangskoder.</p>
+</main>
+<script>
+  const loader = "javascript:(()=>{const s=document.createElement('script');s.charset='utf-8';s.src='https://jenken100.github.io/renewtech-antalis/antalis.js?v='+Date.now();document.body.append(s)})()";
+  const a = document.getElementById('bm');
+  a.href = loader;
+  a.addEventListener('click', e => { e.preventDefault(); alert('Træk knappen op på favoritlinjen i stedet for at klikke på den.'); });
+  const t = document.getElementById('code');
+  t.value = loader;
+  t.addEventListener('focus', () => t.select());
+</script>
+</body>
+</html>
