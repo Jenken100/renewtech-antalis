@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.9';
+const APP_VERSION = '1.10';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -13,7 +13,7 @@ const LS = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
 };
 const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager', FERIE_KEY = 'renewtechAntalisFerie';
-const closedNow = () => defaultClosed(todayUTC, LS.get(FERIE_KEY) || {});
+const closedNow = () => defaultClosed(todayUTC);
 // Stock counts: { code: { pallets, per, at } } in this browser; the engine wants base units.
 const rateOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.perWeek > 0) o[k] = v.perWeek / 7; return o; };
 const LONG_WARN = 21; // days ahead that long-lead items are always shown
@@ -286,14 +286,11 @@ function ui() {
     const byMonth = new Map();
     for (const e of ev) { const d = new Date(e.at), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byMonth.has(k)) byMonth.set(k, []); byMonth.get(k).push(e); }
     const month = k => new Date(Date.UTC(Math.floor(k / 12), k % 12, 1)).toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-    const fc = Object.assign({ jul: { fromDay: 22, toDay: 2 }, sommer: { fromWeek: 29, toWeek: 31 } }, LS.get(FERIE_KEY) || {});
+    // Holidays are worked out automatically every year: Christmas, summer weeks 29-31 and the Danish public holidays.
     const periods = closedNow().filter(c => c.to >= todayUTC && !c.day).map(c => `${c.name} ${fmtDate(c.from)} – ${fmtDate(c.to)} ${new Date(c.to).getUTCFullYear()}`).join(' · ');
     const ferieHtml = `<div class="ferie" style="margin:10px 0;padding:10px 12px;border:1px solid #ecdcb4;background:#fbf6ea;border-radius:8px">
-      <b>Lukkeperioder</b> <span style="color:#636a70">(leverandøren producerer og leverer ikke)</span>: ${esc(periods)} · plus helligdage (påske, Kristi himmelfart, pinse, grundlovsdag, nytår)<br>
-      <span style="color:#636a70">Jul fra</span> <input class="jf" type="number" min="1" max="31" value="${fc.jul.fromDay}" style="width:52px"> dec. <span style="color:#636a70">til</span> <input class="jt" type="number" min="1" max="31" value="${fc.jul.toDay}" style="width:52px"> jan. ·
-      <span style="color:#636a70">Sommerferie uge</span> <input class="sf" type="number" min="1" max="53" value="${fc.sommer.fromWeek}" style="width:52px"> <span style="color:#636a70">til</span> <input class="st" type="number" min="1" max="53" value="${fc.sommer.toWeek}" style="width:52px">
-      <button class="saveferie" style="margin-left:6px;border:1px solid #8a5a00;background:#fff;color:#8a5a00;border-radius:6px;padding:3px 9px;cursor:pointer">Gem</button>
-      <br><span style="color:#636a70">Leveringstid tælles kun i åbne dage. Bestillinger der ellers ville ramme lukningen, flyttes frem og mærkes “før jul” / “før sommerferien”.</span></div>`;
+      <b>Ferie og helligdage er regnet med automatisk:</b> ${esc(periods)} · plus helligdage (nytår, påske, Kristi himmelfart, pinse, grundlovsdag).<br>
+      <span style="color:#636a70">Leveringstid tælles kun i åbne dage. Bestillinger der ellers ville ramme en lukning, flyttes frem og mærkes “før jul” / “før sommerferien”. Datoerne følger kalenderen år for år, så der skal ikke indstilles noget.</span></div>`;
     $('.year').innerHTML = ferieHtml + (!ev.length ? '<p>Ingen varer med nok køb til en årsplan.</p>'
       : '<p style="color:#636a70;margin:8px 0">Forventede bestillinger de næste 12 måneder med det typiske antal. Datoerne flytter sig, når I bestiller, eller når forbruget ændrer sig. Indtast lager under “Lager” for jeres egne kasser.</p>')
       + (!ev.length ? '' : '')
@@ -309,11 +306,6 @@ function ui() {
         }).join('');
         return `<h4>${month(k)} · ${list.length} bestillinger af ${per.size} varer</h4><ul>${rows}</ul>`;
       }).join('');
-    $('.saveferie').onclick = () => {
-      const v = c => Math.round(+$('.ferie ' + c).value) || 0;
-      LS.set(FERIE_KEY, { jul: { fromDay: v('.jf') || 22, toDay: v('.jt') || 2 }, sommer: { fromWeek: v('.sf'), toWeek: v('.st') } });
-      picks.clear(); render();
-    };
   }
 
   // Stock view: pallets on the shelf for your own boxes; the plan then counts from this instead of guessing.
@@ -322,7 +314,7 @@ function ui() {
   function renderStock() {
     const s = LS.get(STOCK_KEY) || {};
     const list = items.filter(it => it.unique || !it.desc || s[it.code]).sort((a, b) => (a.title || '').localeCompare(b.title || '', 'da'));
-    $('.stockp').innerHTML = `<p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Tallene gemmes i denne browser.</p>
+    $('.stockp').innerHTML = `<p>Skriv hvor mange paller der står på lageret nu. Planen regner så fra jeres optælling i stedet for at gætte, og trækker forbruget fra dag for dag. Ret “Stk pr. palle”, hvis tallet ikke passer. Hvert tal gemmes med det samme i denne browser.</p>
       <table><thead><tr><th>Varenr.</th><th>Vare</th><th style="text-align:right">Paller nu</th><th style="text-align:right">Stk pr. palle</th><th style="text-align:right">Forbrug stk/uge</th><th>Sidst talt</th></tr></thead><tbody>${list.map(it => {
         const v = s[it.code] || {};
         return `<tr data-code="${esc(it.code)}"><td class="code">${esc(it.code)}</td><td>${esc(it.title.slice(0, 70))}${it.orders < 2 ? '<span class="why">Kun købt én gang i perioden: forbruget kan ikke regnes endnu</span>' : ''}</td>
@@ -330,18 +322,25 @@ function ui() {
           <td class="qty"><input class="per" type="number" min="1" value="${v.per || defPer(it)}"></td>
           <td class="qty"><input class="pw" type="number" min="0" step="1" value="${v.perWeek || ''}" placeholder="${it.rate > 0 ? Math.round(it.rate * 7) : '?'}" title="Lad stå tomt for at bruge planens eget tal (grå)"></td>
           <td>${v.at ? fmtDate(v.at) : ''}</td></tr>`;
-      }).join('')}</tbody></table><button class="save">Gem lager og regn igen</button>`;
-    $('.stockp .save').onclick = () => {
+      }).join('')}</tbody></table><div style="display:flex;gap:12px;align-items:center"><button class="save">Færdig · vis planen</button><span class="saved" style="color:#2f6b3a;font-weight:600"></span></div>`;
+    // Every field saves the moment it changes, so nothing is lost if the window is closed.
+    const saveRow = tr => {
       const s2 = LS.get(STOCK_KEY) || {};
-      $('.stockp').querySelectorAll('tr[data-code]').forEach(tr => {
-        const code = tr.dataset.code, palRaw = tr.querySelector('.pal').value, per = +tr.querySelector('.per').value, pw = +tr.querySelector('.pw').value || 0;
-        if (palRaw === '' && !pw) { delete s2[code]; return; }
-        const pallets = +String(palRaw).replace(',', '.'), old = s2[code];
+      const code = tr.dataset.code, palRaw = tr.querySelector('.pal').value, per = +tr.querySelector('.per').value, pw = +tr.querySelector('.pw').value || 0;
+      const old = s2[code];
+      if (palRaw === '' && !pw) delete s2[code];
+      else {
+        const pallets = +String(palRaw).replace(',', '.');
         s2[code] = palRaw === '' ? { perWeek: pw, at: Date.now() } : { pallets, per: per > 0 ? per : 250, perWeek: pw, at: old && old.pallets === pallets && old.per === per ? old.at : Date.now() };
-      });
-      LS.set(STOCK_KEY, s2);
-      picks.clear(); setView('list');
+      }
+      const ok = LS.set(STOCK_KEY, s2);
+      const msg = $('.stockp .saved');
+      msg.style.color = ok ? '#2f6b3a' : '#b3261e';
+      msg.textContent = ok ? `Gemt ✓ ${code}` : 'Kunne ikke gemme i browseren. Tjek at antalis.dk må gemme data (cookies og webstedsdata).';
+      const last = tr.querySelector('td:last-child'); if (ok && s2[code]) last.textContent = fmtDate(s2[code].at);
     };
+    $('.stockp').querySelectorAll('tr[data-code] input').forEach(inp => { inp.addEventListener('change', () => saveRow(inp.closest('tr'))); inp.addEventListener('input', () => saveRow(inp.closest('tr'))); });
+    $('.stockp .save').onclick = () => { $('.stockp').querySelectorAll('tr[data-code]').forEach(saveRow); picks.clear(); setView('list'); };
   }
 
   $('.go').onclick = async () => {
