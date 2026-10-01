@@ -193,7 +193,7 @@ function yearPlan(it, today, days = 365) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -414,11 +414,11 @@ function ui() {
     if (view !== 'list') { $('footer').hidden = true; $('.msg').hidden = true; return view === 'year' ? renderYear() : renderStock(); }
     const list = items.filter(it => it.plan && (showAll || (it.plan.daysLeft <= horizon && !it.inactive) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
     $('.bar').hidden = false;
-    $('table').hidden = !list.length;
+    $('.main table').hidden = !list.length;
     $('footer').hidden = !list.length;
     const next = items.filter(it => it.plan && !it.inactive && it.plan.daysLeft > horizon).sort((a, b) => a.plan.orderBy - b.plan.orderBy)[0];
     U.msg(list.length ? '' : `Intet skal bestilles inden for ${horizon} dage.` + (next ? ` Næste er ${next.code} (${next.title.slice(0, 40)}) senest ${fmtDate(next.plan.orderBy)}.` : ''));
-    $('tbody').innerHTML = list.map(it => {
+    $('.main tbody').innerHTML = list.map(it => {
       const p = pickFor(it), f = it.factors[it.plan.unit] || 1, c = cart[it.code];
       const flags = [
         it.unique ? '<span class="pill uniq">Kundeunik</span>' : '',
@@ -441,7 +441,7 @@ function ui() {
   const chosen = () => items.filter(it => it.plan && picks.get(it.code)?.on && picks.get(it.code).qty > 0 && !cart[it.code]);
   const updateSum = () => { const n = chosen().length; $('.sum').textContent = n ? n + ' varer valgt' : 'Ingen varer valgt'; $('.go').disabled = !n; };
 
-  $('tbody').addEventListener('change', e => {
+  $('.main tbody').addEventListener('change', e => {
     const tr = e.target.closest('tr[data-code]'); if (!tr) return;
     const p = picks.get(tr.dataset.code);
     if (e.target.type === 'checkbox') { p.on = e.target.checked; tr.classList.toggle('off', !p.on); }
@@ -510,7 +510,7 @@ function ui() {
     const todo = chosen(); if (!todo.length) return;
     $('.go').disabled = true;
     cart = await readCart();
-    const res = it => $(`tr[data-code="${CSS.escape(it.code)}"] td.res`);
+    const res = it => $(`.main tr[data-code="${CSS.escape(it.code)}"] td.res`);
     for (const it of todo) {
       const cell = res(it);
       if (cart[it.code]) { cell.innerHTML = '<span style="color:#2d5b8a">Lå allerede i kurven</span>'; continue; }
@@ -543,7 +543,7 @@ function ui() {
         LS.set(SENT_KEY, sent);
       }
       else cell.innerHTML = '<span style="color:#b3261e">✗ Kom ikke i kurven</span>';
-      const box = $(`tr[data-code="${CSS.escape(it.code)}"] input[type=checkbox]`); if (box) { box.checked = false; box.disabled = true; }
+      const box = $(`.main tr[data-code="${CSS.escape(it.code)}"] input[type=checkbox]`); if (box) { box.checked = false; box.disabled = true; }
       picks.get(it.code).on = false;
     }
     updateSum();
