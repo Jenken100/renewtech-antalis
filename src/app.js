@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -276,9 +276,9 @@ function ui() {
     for (const e of ev) { const d = new Date(e.at), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byMonth.has(k)) byMonth.set(k, []); byMonth.get(k).push(e); }
     const month = k => new Date(Date.UTC(Math.floor(k / 12), k % 12, 1)).toLocaleDateString('da-DK', { month: 'long', year: 'numeric', timeZone: 'UTC' });
     const fc = Object.assign({ jul: { fromDay: 22, toDay: 2 }, sommer: { fromWeek: 29, toWeek: 31 } }, LS.get(FERIE_KEY) || {});
-    const periods = closedNow().filter(c => c.to >= todayUTC).map(c => `${c.name} ${fmtDate(c.from)} – ${fmtDate(c.to)} ${new Date(c.to).getUTCFullYear()}`).join(' · ');
+    const periods = closedNow().filter(c => c.to >= todayUTC && !c.day).map(c => `${c.name} ${fmtDate(c.from)} – ${fmtDate(c.to)} ${new Date(c.to).getUTCFullYear()}`).join(' · ');
     const ferieHtml = `<div class="ferie" style="margin:10px 0;padding:10px 12px;border:1px solid #ecdcb4;background:#fbf6ea;border-radius:8px">
-      <b>Lukkeperioder</b> <span style="color:#636a70">(leverandøren producerer og leverer ikke)</span>: ${esc(periods)}<br>
+      <b>Lukkeperioder</b> <span style="color:#636a70">(leverandøren producerer og leverer ikke)</span>: ${esc(periods)} · plus helligdage (påske, Kristi himmelfart, pinse, grundlovsdag, nytår)<br>
       <span style="color:#636a70">Jul fra</span> <input class="jf" type="number" min="1" max="31" value="${fc.jul.fromDay}" style="width:52px"> dec. <span style="color:#636a70">til</span> <input class="jt" type="number" min="1" max="31" value="${fc.jul.toDay}" style="width:52px"> jan. ·
       <span style="color:#636a70">Sommerferie uge</span> <input class="sf" type="number" min="1" max="53" value="${fc.sommer.fromWeek}" style="width:52px"> <span style="color:#636a70">til</span> <input class="st" type="number" min="1" max="53" value="${fc.sommer.toWeek}" style="width:52px">
       <button class="saveferie" style="margin-left:6px;border:1px solid #8a5a00;background:#fff;color:#8a5a00;border-radius:6px;padding:3px 9px;cursor:pointer">Gem</button>

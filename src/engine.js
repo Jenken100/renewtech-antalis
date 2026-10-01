@@ -225,6 +225,13 @@ function yearPlan(it, today, days = 365) {
   return out;
 }
 
+// Easter Sunday (Gregorian, anonymous algorithm) as a UTC day.
+function easter(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return Date.UTC(y, Math.floor((h + l - 7 * m + 114) / 31) - 1, ((h + l - 7 * m + 114) % 31) + 1);
+}
+
 // Default holidays: Christmas 22 Dec - 2 Jan and summer weeks 29-31, for this year and the next.
 function defaultClosed(today, cfg = {}) {
   const y0 = new Date(today).getUTCFullYear(), out = [];
@@ -233,6 +240,10 @@ function defaultClosed(today, cfg = {}) {
   for (const y of [y0 - 1, y0, y0 + 1]) {
     out.push({ name: 'jul', from: Date.UTC(y, 11, jul.fromDay), to: Date.UTC(y + 1, 0, jul.toDay) });
     if (som.fromWeek && som.toWeek) out.push({ name: 'sommerferien', from: monday(y, som.fromWeek), to: monday(y, som.toWeek) + 6 * DAY });
+    // Danish public holidays: no production or delivery (Renewtech keeps working, so usage is not paused).
+    const e = easter(y);
+    for (const [name, t] of [['nytår', Date.UTC(y, 0, 1)], ['påske', e - 3 * DAY], ['påske', e - 2 * DAY], ['påske', e + DAY],
+      ['Kristi himmelfart', e + 39 * DAY], ['pinse', e + 50 * DAY], ['grundlovsdag', Date.UTC(y, 5, 5)]]) out.push({ name, from: t, to: t, day: true });
   }
   return out.filter(c => c.to >= today - 30 * DAY);
 }
