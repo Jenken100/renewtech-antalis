@@ -176,12 +176,20 @@ function plan(items, today, opts = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
-const BASE_WORD = it => /ruller/i.test(it.desc) ? 'ruller' : /\bark\b/i.test(it.desc) ? 'ark' : 'stk';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
 const unitDa = (u, n) => { const d = UNIT_DA[u] || u; return n === 1 ? d : (DA_PLURAL[d] || d); };
+// What one base unit is called: pieces, reels or sheets, or the sales unit itself when its size is unknown.
+const BASE_WORD = it => /ruller/i.test(it.desc) ? 'ruller' : /\bark\b/i.test(it.desc) ? 'ark'
+  : (it.factors[it.orderUnit] === 1 && it.orderUnit !== 'Unit(s)') ? unitDa(it.orderUnit, 2) : 'stk';
+const LS = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
+};
+const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt';
+const fmtTime = t => new Date(t).toLocaleString('da-DK', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDate = t => new Date(t).toLocaleDateString('da-DK', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const fmtNum = n => Math.round(n).toLocaleString('da-DK');
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -266,6 +274,8 @@ function ui() {
     .go[disabled] { opacity: .5; cursor: default }
     a.cart { color: #9a6a35; font-weight: 600 }
     label.all { display: inline-flex; gap: 6px; align-items: center; cursor: pointer }
+    .warn { padding: 10px 18px; background: #fbefd6; color: #8a5a00; border-bottom: 1px solid #ecdcb4 }
+    .warn button { margin-left: 8px; border: 1px solid #8a5a00; background: #fff; color: #8a5a00; border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
   </style>
   <div class="back"></div>
   <div class="win" role="dialog" aria-label="Renewtech Antalis-bestilling">
@@ -275,6 +285,7 @@ function ui() {
       <div class="seg"><button data-h="7" aria-pressed="true">7 dage</button><button data-h="14" aria-pressed="false">14 dage</button><button data-h="30" aria-pressed="false">30 dage</button></div>
       <label class="all"><input type="checkbox" class="showall"> Vis alle varer</label>
     </div>
+    <div class="warn" hidden></div>
     <div class="msg">Starter…</div>
     <div class="scroll"><table hidden><thead><tr><th></th><th>Varenr.</th><th>Vare og udregning</th><th>Status</th><th>Bestil senest</th><th style="text-align:right">Antal</th><th>Kurv</th></tr></thead><tbody></tbody></table></div>
     <footer hidden><button class="go">Læg valgte i kurven</button><a class="cart" href="${CTX}/ws/html/cart/cartSummary">Gå til kurven</a><span class="sum"></span></footer>
@@ -292,22 +303,45 @@ function ui() {
   const U = ui(), $ = U.$;
   if (!document.querySelector('.header__login-name')) { U.msg('Du er ikke logget ind. Log ind på antalis.dk, og tryk på bogmærket igen.', true); return; }
 
-  let items, cart;
+  let items, cart, histAt = Date.now(), fromCache = false;
+  const relogin = () => { location.href = CTX + '/ws/html/secure/myaccount/orderhistory/newOrderHistory'; };
   try {
     U.msg('Henter jeres ordrehistorik fra Antalis (12 måneder)…');
-    const rows = parseExport(await fetchHistory(365));
+    let text;
+    try {
+      text = await fetchHistory(365);
+      parseExport(text);
+      LS.set(HIST_KEY, { at: histAt, csv: text });
+    } catch (e) {
+      // "Min konto" has logged out: fall back to the last history this browser fetched.
+      const cached = LS.get(HIST_KEY);
+      if (!e.login || !cached || !cached.csv) throw e;
+      text = cached.csv; histAt = cached.at; fromCache = true;
+    }
+    const rows = parseExport(text);
+    // Items this tool put in the cart after the history was fetched count as ordered, so they are not suggested twice.
+    const sent = LS.get(SENT_KEY) || {};
+    for (const [code, s] of Object.entries(sent)) {
+      if (s.at > histAt) rows.push({ order: 'Renewtech-kurv', date: Date.UTC(new Date(s.at).getFullYear(), new Date(s.at).getMonth(), new Date(s.at).getDate()), item: code, desc: s.desc || '', deliv: null, status: 'Lagt i kurven', qty: s.qty, unit: s.unit, sent: true });
+    }
     items = buildItems(rows);
+    for (const it of items) { const s = sent[it.code]; it.sentAfter = s && s.at > histAt ? s : null; }
     U.msg('Tjekker kurven…');
     cart = await readCart();
   } catch (e) {
     if (e.login) {
       U.msg('');
       const m = $('.msg'); m.hidden = false; m.className = 'msg err';
-      m.innerHTML = 'Antalis vil have dig til at logge ind igen, før ordrehistorikken kan hentes. Det sker, når man har været logget ind et stykke tid. <br><br><button class="go relogin">Log ind igen</button> <span style="color:#636a70;font-weight:400">Tryk så på bogmærket igen bagefter.</span>';
-      $('.relogin').onclick = () => { location.href = CTX + '/ws/html/secure/myaccount/orderhistory/newOrderHistory'; };
+      m.innerHTML = 'Antalis vil have dig til at logge ind igen, før ordrehistorikken kan hentes. Sæt flueben i “Forbliv logget ind”. <br><br><button class="go relogin">Log ind igen</button> <span style="color:#636a70;font-weight:400">Tryk så på bogmærket igen bagefter. Herefter husker bogmærket ordrehistorikken, så du ikke skal logge ind hver gang.</span>';
+      $('.relogin').onclick = relogin;
       return;
     }
     U.msg('Kunne ikke hente data: ' + e.message, true); return;
+  }
+  if (fromCache) {
+    const w = $('.warn'); w.hidden = false;
+    w.innerHTML = `Bygger på ordrehistorikken hentet <b>${fmtTime(histAt)}</b>, fordi “Min konto” har logget dig ud. Bestillinger lavet efter det uden om bogmærket kan mangle. Varer i kurven og varer bogmærket selv har lagt i kurven, er regnet med. <button class="relogin2">Log ind og hent ny</button>`;
+    $('.relogin2').onclick = relogin;
   }
 
   let horizon = 7, showAll = false;
@@ -341,6 +375,7 @@ function ui() {
       const p = pickFor(it), f = it.factors[it.plan.unit] || 1, c = cart[it.code];
       const flags = [
         it.unique ? '<span class="pill uniq">Kundeunik</span>' : '',
+        it.sentAfter ? `<span class="pill info">Lagt i kurven af bogmærket ${fmtTime(it.sentAfter.at)} · regnet som bestilt</span>` : '',
         it.onTheWay ? `<span class="pill info">På vej · lev. ${fmtDate(it.onTheWay)}</span>` : '',
         it.plan.lowData ? `<span class="pill plain">Kun ${it.orders} køb</span>` : '',
         it.assumed.length ? '<span class="pill plain">Omregning anslået</span>' : ''
@@ -401,7 +436,13 @@ function ui() {
     let ok = 0;
     for (const it of todo) {
       const c = cart[it.code], cell = res(it);
-      if (c) { ok++; cell.innerHTML = `<span style="color:#2f6b3a">✓ I kurven: ${c.qty} ${esc(UNIT_DA[c.unit] ? unitDa(c.unit, c.qty) : c.unit)}</span>`; }
+      if (c) {
+        ok++; cell.innerHTML = `<span style="color:#2f6b3a">✓ I kurven: ${c.qty} ${esc(UNIT_DA[c.unit] ? unitDa(c.unit, c.qty) : c.unit)}</span>`;
+        const sent = LS.get(SENT_KEY) || {}, p = picks.get(it.code);
+        sent[it.code] = { at: Date.now(), qty: p.qty, unit: it.plan.unit, desc: it.desc };
+        for (const k of Object.keys(sent)) if (Date.now() - sent[k].at > 90 * DAY) delete sent[k];
+        LS.set(SENT_KEY, sent);
+      }
       else cell.innerHTML = '<span style="color:#b3261e">✗ Kom ikke i kurven</span>';
       const box = $(`tr[data-code="${CSS.escape(it.code)}"] input[type=checkbox]`); if (box) { box.checked = false; box.disabled = true; }
       picks.get(it.code).on = false;
