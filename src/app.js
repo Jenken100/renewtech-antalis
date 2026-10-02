@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -133,6 +133,7 @@ function ui() {
     th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; background: var(--soft) }
     .nm { font-weight: 600; font-size: 14.5px }
     .meta { color: var(--muted); font-size: 12px; margin-top: 1px } .meta a { color: inherit; font-family: var(--mono); font-weight: 600 } .meta .dim { font-family: var(--mono) }
+    .spec { color: var(--muted); font-size: 11.5px; margin-top: 2px; line-height: 1.4 }
     .why { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; max-width: 62ch }
     .flags { margin-top: 4px }
     .pill { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; white-space: nowrap; margin: 0 4px 3px 0 }
@@ -336,6 +337,7 @@ function ui() {
     it.plan && it.plan.lowData ? `<span class="pill plain">Kun ${it.orders} køb</span>` : '',
     it.assumed.length ? '<span class="pill plain">Omregning af enhed anslået</span>' : ''
   ].join('');
+  const specHtml = it => { const p = specParts(it); return GROUP[it.group]?.box && p.length ? `<div class="spec">${p.map(esc).join(' · ')}</div>` : ''; };
   const subOf = it => [`<a href="${WS}html/catalog/resultPage?keyWord=${esc(it.code)}" target="_blank" title="Åbn varen hos Antalis">#${esc(it.code)}</a>`, it.dims ? `<span class="dim">${esc(it.dims)}</span>` : ''].filter(Boolean).join(' · ');
   const qtyHtml = it => {
     const p = pickFor(it), f = factorOf(it), u = unitOf(it);
@@ -347,7 +349,7 @@ function ui() {
     const p = pickFor(it), full = it.name && it.title && !/ingen beskrivelse/.test(it.title) ? it.title : '';
     return `<tr data-code="${esc(it.code)}" class="${p.on ? '' : 'off'}">
       <td style="width:28px">${checkHtml(it)}</td>
-      <td><div class="nm">${esc(nameOf(it))} <button class="i" type="button" aria-expanded="false" title="Hvorfor?">i</button></div><div class="meta">${subOf(it)}</div>${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
+      <td><div class="nm">${esc(nameOf(it))} <button class="i" type="button" aria-expanded="false" title="Hvorfor?">i</button></div><div class="meta">${subOf(it)}</div>${specHtml(it)}${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
         <div class="more" hidden><p>${why(it)}</p>${full ? `<p class="muted">Antalis: ${esc(full.slice(0, 140))}</p>` : ''}${moreFlags(it)}</div></td>
       <td>${whenCell(it)}</td>
       <td>${cover(it)}</td>
@@ -359,6 +361,7 @@ function ui() {
     const p = pickFor(it), cls = 'st-' + (!it.plan || it.inactive ? 'idle' : it.state);
     return `<div class="bx ${cls}${p.on ? ' on' : ''}" data-code="${esc(it.code)}">
       <div class="bx-h"><div><div class="nm">${esc(nameOf(it))}</div><div class="meta">${subOf(it)}</div></div>${whenCell(it)}</div>
+      ${specHtml(it)}
       ${cover(it, true)}
       <div class="bx-m">${it.plan ? `${weekTxt(it)} ${BASE_WORD(it)}/uge · lev.tid ${it.plan.lead} d` : `Kun ${it.orders} køb · lev.tid ${it.lead} d`}</div>
       ${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}

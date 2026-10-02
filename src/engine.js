@@ -23,9 +23,10 @@ const LIVE_UNITS = {
 // 'bc' size taken from the Business Central invoice text, 'guess' not confirmed, 'unk' size unknown.
 const GROUPS = [
   { id: 'std', name: 'Standardkasser', box: true },
+  { id: 'fold', name: 'Foldekasser', box: true },
   { id: 'pal', name: 'Pallekasser 80 og 100', box: true },
   { id: 'srv', name: 'Server- og specialkasser', box: true },
-  { id: 'kor', name: 'Bundkort og Korrvu', box: true },
+  { id: 'kor', name: 'Bundkortkasser', box: true },
   { id: 'fyld', name: 'Fyld og beskyttelse' },
   { id: 'tape', name: 'Tape, film og bånd' },
   { id: 'pose', name: 'Poser og følgesedler' },
@@ -58,17 +59,17 @@ const BOXES = {
   '740053': ['srv', 'Ukendt kasse B', '', 'unk'],
   '740055': ['srv', 'Ukendt kasse C', '', 'unk'],
   '704302': ['kor', 'Bundkortkasse', '675×576×152', 'ok'],
-  '704336': ['kor', 'Bundkort-indlæg (Korrvu)', '785×1116, vindue 510×590', 'ok'],
-  '704335': ['kor', 'Korrvu 513×336', '513×336', 'guess'],
-  '704337': ['kor', 'Korrvu alt-i-en', 'kt18294U', 'guess'],
-  '746306': ['kor', 'Større foldekasse (Korrvu)', 'vindue 265×326', 'ok'],
+  '704336': ['kor', 'Bundkort-indlæg (Korrvu)', '785×1116', 'ok'],
+  '704335': ['fold', 'Foldekasse 2,5"', '513×336', 'ok'],
+  '704337': ['fold', 'Foldekasse 3,5"', '', 'ok'],
+  '746306': ['fold', 'Større foldekasse', '', 'ok'],
   // Not a box, but the export has no description for it: name from the BC invoice text.
   '704389': ['tape', 'LDPE-folie', '', 'bc']
 };
 function classify(code, desc) {
   if (BOXES[code]) return BOXES[code][0];
   const d = desc.toLowerCase();
-  if (/korrvu|korvu/.test(d)) return 'kor';
+  if (/korrvu|korvu/.test(d)) return 'fold';
   if (/bølgepapkasse/.test(d)) return /kundeunikke/.test(d) ? 'srv' : 'std';
   if (/sæbe|toilet|håndklæde|servie?t/.test(d)) return 'drift';
   if (/boblefolie|padpak|instapak|skum|kantbeskyt|kant og hjørne|støddæmp|bølgepapark|paprør|stratocell|hjørne/.test(d)) return 'fyld';
@@ -129,6 +130,7 @@ function parseExport(text) {
   const head = splitCsvLine(first, sep).map(norm);
   const col = key => { for (const n of COLS[key]) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
   const C = {}; for (const k of Object.keys(COLS)) C[k] = col(k);
+  C.weight = head.lastIndexOf('vægt') >= 0 ? head.lastIndexOf('vægt') : head.lastIndexOf('weight');
   if (C.no < 0 || C.item < 0 || C.qty < 0) {
     const peek = first.slice(0, 160).replace(/\s+/g, ' ');
     throw new Error('Ordrehistorikken kunne ikke læses (kolonnerne Ordrenummer, Varenummer og Antal blev ikke fundet). Filen starter med: “' + peek + '”');
@@ -140,9 +142,40 @@ function parseExport(text) {
     // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
     if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date), ref: (r[C.ref] || '').trim(), user: (r[C.user] || '').trim() }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
-    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim(), price: C.price >= 0 ? parseNum(String(r[C.price] || '').replace(/[^\d,.\s ]/g, '')) || 0 : 0 });
+    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim(), price: C.price >= 0 ? parseNum(String(r[C.price] || '').replace(/[^\d,.\s ]/g, '')) || 0 : 0, kg: C.weight >= 0 ? parseNum(String(r[C.weight] || '').replace(/[^\d,.\s ]/g, '')) || 0 : 0 });
   }
   return rows;
+}
+
+// Every measurement Antalis puts in the description: inner and outer size, board, FEFCO type, bundle and pallet size.
+function specOf(desc) {
+  const d = String(desc || ''), sp = {};
+  const dim = re => { const m = d.match(re); return m ? m[1].replace(/\s*x\s*/gi, '×').replace(/\s+/g, '') : ''; };
+  sp.inner = dim(/indre dim:\s*([\d.,]+\s*x\s*[\d.,]+\s*x\s*[\d.,]+)/i);
+  sp.outer = dim(/udvendig dim:\s*([\d.,]+\s*x\s*[\d.,]+\s*x\s*[\d.,]+)/i);
+  if (!sp.inner && !sp.outer) sp.size = dim(/(\d{2,4}\s*x\s*\d{2,4}\s*x\s*\d{2,4}(?:\/\d{2,4})?)/i) || dim(/(\d{2,4}\s*x\s*\d{2,4})\s*mm/i);
+  const win = d.match(/vindue\s*(\d{2,4})\s*x\s*(\d{2,4})/i); if (win) sp.window = win[1] + '×' + win[2];
+  const board = d.match(/(\d)-lags,\s*([A-Z]{1,2})-flute(?:,\s*([\d.]+)\s*mm)?/i);
+  if (board) sp.board = `${board[1]}-lags ${board[2].toUpperCase()}-bølge` + (board[3] ? `, ${parseFloat(board[3]).toLocaleString('da-DK')} mm` : '');
+  const fefco = d.match(/FEFCO\s*(\d{4})/i); if (fefco) sp.fefco = fefco[1];
+  const bundle = d.match(/bundt a (\d+)/i); if (bundle) sp.bundle = +bundle[1];
+  const pallet = d.match(/palle a ([\d.]+)/i); if (pallet) sp.pallet = parseNum(pallet[1]);
+  return sp;
+}
+
+// The measurements as short Danish parts, e.g. ['Indv. 440×320×250 mm', '1-lags C-bølge, 4 mm', 'FEFCO 0201', 'Bundt 25 stk', 'Palle 450 stk', '0,42 kg/stk'].
+function specParts(it) {
+  const sp = it.spec || {}, out = [], kg = it.kgEach;
+  if (sp.outer && sp.outer !== sp.inner) out.push(`Udv. ${sp.outer} mm`);
+  if (sp.inner) out.push(`Indv. ${sp.inner} mm`);
+  if (!sp.inner && !sp.outer) out.push(sp.size || it.dims ? `${sp.size || it.dims} mm` : 'Mål ikke oplyst af Antalis');
+  if (sp.window) out.push(`Vindue ${sp.window} mm`);
+  if (sp.board) out.push(sp.board);
+  if (sp.fefco) out.push(`FEFCO ${sp.fefco}`);
+  if (sp.bundle) out.push(`Bundt ${sp.bundle} stk`);
+  if (sp.pallet) out.push(`Palle ${sp.pallet.toLocaleString('da-DK')} stk`);
+  if (kg) out.push(`${kg < 1 ? kg.toLocaleString('da-DK', { maximumFractionDigits: 3 }) : kg.toLocaleString('da-DK', { maximumFractionDigits: 2 })} kg/stk`);
+  return out;
 }
 
 function descFactors(desc) {
@@ -203,7 +236,12 @@ function buildItems(rows) {
     const priced = lines.filter(l => l.price > 0 && l.qty > 0 && factors[l.unit]);
     const lp = priced[priced.length - 1];
     const box = BOXES[code];
+    // Weight per base unit from the export's line weight (median over the lines that have one).
+    const kgs = lines.filter(l => l.kg > 0 && l.qty > 0 && factors[l.unit]).map(l => l.kg / (l.qty * factors[l.unit]));
+    const spec = specOf(desc);
+    if (factors['Pallet(s)'] && !spec.pallet && !assumed.includes('Pallet(s)')) spec.pallet = factors['Pallet(s)'];
     items.push({
+      spec, kgEach: kgs.length ? median(kgs) : null,
       group: classify(code, desc), name: box ? box[1] : '', dims: box ? box[2] : '', conf: box ? box[3] : '',
       unitPrice: lp ? lp.price / (lp.qty * factors[lp.unit]) : null,
       code, desc, category: desc.split(',')[0] || '(ingen beskrivelse)',
@@ -346,4 +384,4 @@ function defaultClosed(today, cfg = {}) {
   return out.filter(c => c.to >= today - 30 * DAY);
 }
 
-if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, defaultClosed, UNIT_DA, DAY, GROUPS, BOXES };
+if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, defaultClosed, UNIT_DA, DAY, GROUPS, BOXES, specOf, specParts };
