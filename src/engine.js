@@ -11,8 +11,71 @@ const LIVE_UNITS = {
   '588220': { 'Pack(s)': 3, 'Reel(s)': 1 },
   '693886': { 'Unit(s)': 1, 'Pallet(s)': 300, 'Bundle(s)': 25 },
   '694014': { 'Unit(s)': 1, 'Pallet(s)': 135, 'Bundle(s)': 15 },
-  '694211': { 'Unit(s)': 1, 'Carton(s)': 100 }
+  '694211': { 'Unit(s)': 1, 'Carton(s)': 100 },
+  // Customer-unique items bought per pallet: pieces per pallet worked out from the price per piece (2026-10-02).
+  '704335': { 'Unit(s)': 1, 'Pallet(s)': 2400 },
+  '704337': { 'Unit(s)': 1, 'Pallet(s)': 1020 },
+  '704256': { 'Unit(s)': 1, 'Pallet(s)': 500 },
+  '704307': { 'Unit(s)': 1, 'Pallet(s)': 125 }
 };
+
+// The warehouse's own names for the boxes (Kasseoversigt 2026-10-02). conf: 'ok' confirmed, 'vol' named from the inner volume,
+// 'bc' size taken from the Business Central invoice text, 'guess' not confirmed, 'unk' size unknown.
+const GROUPS = [
+  { id: 'std', name: 'Standardkasser', box: true },
+  { id: 'pal', name: 'Pallekasser 80 og 100', box: true },
+  { id: 'srv', name: 'Server- og specialkasser', box: true },
+  { id: 'kor', name: 'Bundkort og Korrvu', box: true },
+  { id: 'fyld', name: 'Fyld og beskyttelse' },
+  { id: 'tape', name: 'Tape, film og bånd' },
+  { id: 'pose', name: 'Poser og følgesedler' },
+  { id: 'drift', name: 'Kontor, kantine og rengøring' }
+];
+const BOXES = {
+  '693960': ['std', '8L', '284×185×165', 'vol'],
+  '693794': ['std', '12L', '300×200×200', 'vol'],
+  '693820': ['std', '18L', '310×230×250', 'vol'],
+  '693890': ['std', '25L', '450×350×160', 'vol'],
+  '693859': ['std', '25L lang', '540×290×160', 'vol'],
+  '693880': ['std', '35L', '440×320×250', 'vol'],
+  '693861': ['std', '37L', '605×290×210', 'vol'],
+  '693886': ['std', '50L', '460×336×325', 'vol'],
+  '694014': ['std', '82L', '585×385×364', 'vol'],
+  '704299': ['pal', '80 pallekasse bund', '753×553×160', 'ok'],
+  '705389': ['pal', '80 pallekasse top lille', '772×586×164', 'ok'],
+  '705388': ['pal', '80 pallekasse top mellem', '772×586×243', 'ok'],
+  '750195': ['pal', '80 pallekasse top stor', '772×586×323', 'ok'],
+  '734203': ['pal', '100 pallekasse bund', '953×553×160', 'bc'],
+  '704304': ['pal', '100 pallekasse top lille', '972×586×164', 'ok'],
+  '729150': ['pal', '100 pallekasse top (mellem?)', '', 'guess'],
+  '704307': ['srv', '60×60×48', '600×600×480', 'ok'],
+  '704256': ['srv', 'Railkit-kasse?', '900×350×100', 'guess'],
+  '704258': ['srv', 'Server-/specialkasse', '700×355×200/155', 'ok'],
+  '750193': ['srv', 'Kasse 10', '1141×1085×100', 'ok'],
+  '704314': ['srv', '100 serverkasse?', '1010×640×190', 'guess'],
+  '704316': ['srv', '80 serverkasse?', '820×640×190', 'guess'],
+  '740051': ['srv', 'Ukendt kasse A', '', 'unk'],
+  '740053': ['srv', 'Ukendt kasse B', '', 'unk'],
+  '740055': ['srv', 'Ukendt kasse C', '', 'unk'],
+  '704302': ['kor', 'Bundkortkasse', '675×576×152', 'ok'],
+  '704336': ['kor', 'Bundkort-indlæg (Korrvu)', '785×1116, vindue 510×590', 'ok'],
+  '704335': ['kor', 'Korrvu 513×336', '513×336', 'guess'],
+  '704337': ['kor', 'Korrvu alt-i-en', 'kt18294U', 'guess'],
+  '746306': ['kor', 'Større foldekasse (Korrvu)', 'vindue 265×326', 'ok'],
+  // Not a box, but the export has no description for it: name from the BC invoice text.
+  '704389': ['tape', 'LDPE-folie', '', 'bc']
+};
+function classify(code, desc) {
+  if (BOXES[code]) return BOXES[code][0];
+  const d = desc.toLowerCase();
+  if (/korrvu|korvu/.test(d)) return 'kor';
+  if (/bølgepapkasse/.test(d)) return /kundeunikke/.test(d) ? 'srv' : 'std';
+  if (/sæbe|toilet|håndklæde|servie?t/.test(d)) return 'drift';
+  if (/boblefolie|padpak|instapak|skum|kantbeskyt|kant og hjørne|støddæmp|bølgepapark|paprør|stratocell|hjørne/.test(d)) return 'fyld';
+  if (/tape|film|strapbånd|pet-bånd|hæfteklammer/.test(d)) return 'tape';
+  if (/pose|følgeseddel/.test(d) && !/affald|spandepose/.test(d)) return 'pose';
+  return 'drift';
+}
 
 function parseDate(s) {
   s = (s || '').trim();
@@ -49,7 +112,8 @@ const COLS = {
   qty: ['antal', 'quantity', 'qty'],
   unit: ['enhed', 'unit'],
   ref: ['minordrereference', 'myorderreference', 'ordrereference'],
-  user: ['brugernavn', 'username']
+  user: ['brugernavn', 'username'],
+  price: ['pris', 'price']
 };
 
 function parseExport(text) {
@@ -76,7 +140,7 @@ function parseExport(text) {
     // Antalis writes an order header row, then one row per line. Some exports repeat the order number on every row.
     if ((r[C.no] || '').trim()) { order = { no: r[C.no].trim(), date: parseDate(r[C.date]) || (order && order.date), ref: (r[C.ref] || '').trim(), user: (r[C.user] || '').trim() }; if (!item) continue; }
     if (!order || !item || item === 'DEFAULT') continue;
-    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim() });
+    rows.push({ order: order.no, date: order.date, ref: order.ref, user: order.user, item, desc: (r[C.desc] || '').trim(), deliv: parseDate(r[C.deliv]), status: (r[C.status] || '').trim(), qty: parseNum(r[C.qty]), unit: (r[C.unit] || '').trim(), price: C.price >= 0 ? parseNum(String(r[C.price] || '').replace(/[^\d,.\s ]/g, '')) || 0 : 0 });
   }
   return rows;
 }
@@ -135,7 +199,13 @@ function buildItems(rows) {
     const intervals = events.slice(1).map((e, i) => (e.date - events[i].date) / DAY);
     const typicalBase = median(events.slice(-4).map(e => e.base));
     const orderUnit = last.unit;
+    // Last known price per base unit (the export's Pris is the line total), for the estimate of the cart.
+    const priced = lines.filter(l => l.price > 0 && l.qty > 0 && factors[l.unit]);
+    const lp = priced[priced.length - 1];
+    const box = BOXES[code];
     items.push({
+      group: classify(code, desc), name: box ? box[1] : '', dims: box ? box[2] : '', conf: box ? box[3] : '',
+      unitPrice: lp ? lp.price / (lp.qty * factors[lp.unit]) : null,
       code, desc, category: desc.split(',')[0] || '(ingen beskrivelse)',
       title: desc.split(',').slice(1).join(',').trim() || desc || '(ingen beskrivelse i eksporten)',
       unique: /kundeunikke/i.test(desc), lines, events, factors, assumed, lead, leadSafe, longLead: leadSafe >= 14, rate,
@@ -276,4 +346,4 @@ function defaultClosed(today, cfg = {}) {
   return out.filter(c => c.to >= today - 30 * DAY);
 }
 
-if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, defaultClosed, UNIT_DA, DAY };
+if (typeof module !== 'undefined') module.exports = { parseExport, buildItems, plan, yearPlan, defaultClosed, UNIT_DA, DAY, GROUPS, BOXES };
