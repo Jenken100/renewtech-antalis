@@ -64,7 +64,7 @@ const BOXES = {
   '704302': ['kor', 'Bundkortkasse', '675×576×152', 'ok'],
   '704336': ['kor', 'Bundkort-indlæg (Korrvu)', '785×1116', 'ok'],
   '704335': ['fold', 'Foldekasse 2,5"', '513×336', 'ok'],
-  '704337': ['fold', 'Foldekasse 3,5"', '', 'ok'],
+  '704337': ['fold', 'Foldekasse 3,5"', '260×180×40', 'ok'],
   '746306': ['fold', 'Større foldekasse', '', 'ok'],
   // Not a box, but the export has no description for it: name from the BC invoice text.
   '704389': ['tape', 'LDPE-folie', '', 'bc']
@@ -390,7 +390,7 @@ function defaultClosed(today, cfg = {}) {
 
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -404,6 +404,20 @@ const LS = {
 };
 const HIST_KEY = 'renewtechAntalisHistorik', SENT_KEY = 'renewtechAntalisSendt', STOCK_KEY = 'renewtechAntalisLager', FERIE_KEY = 'renewtechAntalisFerie';
 const closedNow = () => defaultClosed(todayUTC);
+// A selection sent from the box overview: antalis.dk/...#rtk=704337:2040,693880:100 (item:pieces).
+// It is kept in localStorage for 2 hours, so it survives a login and works in another antalis.dk tab too.
+const WISH_KEY = 'renewtechAntalisOenske';
+function readWish() {
+  const m = location.hash.match(/rtk=([\d:,]+)/);
+  if (m) {
+    const items = {};
+    for (const part of m[1].split(',')) { const [code, n] = part.split(':'); if (code && +n > 0) items[code] = +n; }
+    LS.set(WISH_KEY, { at: Date.now(), items });
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* the hash just stays */ }
+  }
+  const w = LS.get(WISH_KEY);
+  return w && w.items && Date.now() - w.at < 2 * 3600000 && Object.keys(w.items).length ? w : null;
+}
 // Stock counts: { code: { pallets, per, at } } in this browser; the engine wants base units.
 const rateOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.perWeek > 0) o[k] = v.perWeek / 7; return o; };
 const LONG_WARN = 21; // days ahead that long-lead items are always shown
@@ -550,6 +564,7 @@ function ui() {
     .spacer { flex: 1 }
     .note { margin: 10px 20px 0; padding: 10px 14px; border-radius: 10px; font-size: 13.5px }
     .warn { background: var(--soon-bg); color: var(--soon) }
+    .wish { background: #E6F7F0; color: #0B4F35; border: 1px solid var(--green) } .wish button { margin-left: 8px; border: 1px solid #0B4F35; background: #fff; color: #0B4F35; border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
     .warn button { margin-left: 8px; border: 1px solid var(--soon); background: #fff; color: var(--soon); border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
     .year h4, .ordered h4 { margin: 18px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
     .year ul, .ordered ul { margin: 0; padding-left: 18px } .year li, .ordered li { margin: 3px 0 } .late { color: var(--now); font-weight: 600 }
@@ -600,6 +615,7 @@ function ui() {
     <header><div><b>Antalis-bestilling</b><small>Renewtech · v${APP_VERSION}</small><span class="src"></span></div><button class="x" title="Luk" aria-label="Luk">×</button></header>
     <div class="hero" hidden></div>
     <div class="note warn" hidden></div>
+    <div class="note wish" hidden></div>
     <div class="weeks" hidden></div>
     <div class="tabs" hidden><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="boxes" aria-pressed="false">Kasser</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="ordered" aria-pressed="false">Bestilt</button><button data-v="stock" aria-pressed="false">Lager</button>
       <span class="spacer"></span><label class="all"><input type="checkbox" class="showall"> Vis alle varer</label><input class="find" type="search" placeholder="Søg navn eller varenr." aria-label="Søg"></div>
@@ -679,6 +695,23 @@ function ui() {
     }
     return picks.get(it.code);
   };
+  // The selection from the box overview replaces the plan's own picks for those items, in the item's order unit.
+  let wish = readWish();
+  const wishSet = new Set();
+  const applyWish = () => {
+    if (!wish) { $('.wish').hidden = true; return; }
+    const missing = [];
+    for (const [code, pcs] of Object.entries(wish.items)) {
+      const it = items.find(i => i.code === code);
+      if (!it) { missing.push(code); continue; }
+      wishSet.add(code);
+      picks.set(code, { on: !cart[code], qty: Math.max(1, Math.ceil(pcs / factorOf(it) - 1e-9)) });
+    }
+    const w = $('.wish'); w.hidden = false;
+    w.innerHTML = `<b>Fra kasseoversigten:</b> ${wishSet.size} ${wishSet.size === 1 ? 'vare er valgt' : 'varer er valgt'} med jeres antal. Tjek dem, og tryk “Læg valgte i kurven”.`
+      + (missing.length ? ` <span>Ukendt varenr.: ${missing.map(esc).join(', ')}.</span>` : '') + ' <button class="nowish">Glem valget</button>';
+    $('.nowish').onclick = () => { LS.set(WISH_KEY, null); wish = null; wishSet.clear(); picks.clear(); $('.wish').hidden = true; render(); };
+  };
   // When it must be ordered, said the way people say it: weekday and date, then how far away.
   // Whole calendar days from today to the day of t (plan dates can carry a time of day).
   const endDot = t => /\.$/.test(t) ? t : t + '.';
@@ -715,6 +748,7 @@ function ui() {
   };
   // The few flags that change what you do go on the row; the rest sit under (i).
   const mainFlags = it => [
+    wishSet.has(it.code) ? '<span class="pill ok">Fra kasseoversigten</span>' : '',
     it.longLead ? `<span class="pill now">Lang lev.tid · ${it.plan ? it.plan.lead : it.lead} d</span>` : '',
     it.onTheWay ? `<span class="pill info">På vej · ${fmtDate(it.onTheWay)}</span>` : '',
     it.sentAfter ? `<span class="pill info">Lagt i kurven ${fmtTime(it.sentAfter.at)}</span>` : '',
@@ -806,7 +840,7 @@ function ui() {
       const tip = b.length ? b.map(it => nameOf(it)).join(', ') : 'Intet';
       return `<button class="wk${w <= weekSel ? ' sel' : ''}${late ? ' late' : ''}${b.length ? '' : ' none'}" data-w="${w}" title="${esc(tip)}"><span class="wn">${label}</span><span class="wc">${b.length || '–'}</span>${lng ? '<i class="dot" title="Lang leveringstid"></i>' : ''}</button>`;
     }).join('');
-    U.root.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { weekSel = +b.dataset.w; horizon = horizonFor(weekSel); picks.clear(); setView('list'); });
+    U.root.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { weekSel = +b.dataset.w; horizon = horizonFor(weekSel); picks.clear(); applyWish(); setView('list'); });
     U.root.querySelectorAll('[data-go]').forEach(b => b.onclick = () => setView(b.dataset.go));
     $('.tabs').hidden = false;
     $('.find').hidden = !(view === 'list' || view === 'boxes');
@@ -822,7 +856,7 @@ function ui() {
       const list = items.filter(it => GROUP[it.group] && GROUP[it.group].box && matches(it)).sort((a, b) => (a.plan && !a.inactive ? a.plan.orderBy : Infinity) - (b.plan && !b.inactive ? b.plan.orderBy : Infinity));
       html = `<p class="intro">Alle jeres kasser. Baren viser hvor mange dage lageret rækker, inkl. det der er på vej. Når den farvede del når den sorte streg, skal kassen bestilles.</p>` + groupsHtml(list, 'Ingen kasser fundet.', true);
     } else {
-      const list = items.filter(it => matches(it) && it.plan && (showAll || query || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
+      const list = items.filter(it => matches(it) && (wishSet.has(it.code) || (it.plan && (showAll || query || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])))).sort((a, b) => (wishSet.has(b.code) - wishSet.has(a.code)) || (!!a.inactive - !!b.inactive) || ((a.plan ? a.plan.orderBy : 0) - (b.plan ? b.plan.orderBy : 0)));
       const next = planned.find(it => it.plan.daysLeft > horizon);
       const empty = `<b>Intet skal bestilles ${untilTxt}.</b>` + (next ? `<br>Næste er ${esc(nameOf(next))} senest ${fmtDay(next.plan.orderBy)}. Vælg en senere uge ovenfor for at se den.` : '');
       html = (list.length && !showAll && !query ? `<p class="intro">Varer der skal bestilles ${untilTxt}. Varer med flueben er klar til kurven. Tryk på <b>i</b> for at se udregningen.</p>` : '') + groupsHtml(list, empty, false);
@@ -978,7 +1012,7 @@ function ui() {
     };
     $('.stockp .q').addEventListener('input', ev => { const q = ev.target.value.trim().toLowerCase(); $('.stockp').querySelectorAll('tr[data-code]').forEach(tr => { tr.hidden = !!q && !tr.textContent.toLowerCase().includes(q) && !tr.dataset.code.includes(q); }); });
     $('.stockp').querySelectorAll('tr[data-code] input').forEach(inp => { inp.addEventListener('change', () => saveRow(inp.closest('tr'))); inp.addEventListener('input', () => saveRow(inp.closest('tr'))); });
-    $('.stockp .save').onclick = () => { $('.stockp').querySelectorAll('tr[data-code]').forEach(saveRow); picks.clear(); setView('list'); };
+    $('.stockp .save').onclick = () => { $('.stockp').querySelectorAll('tr[data-code]').forEach(saveRow); picks.clear(); applyWish(); setView('list'); };
   }
 
   $('.go').onclick = async () => {
@@ -1023,8 +1057,11 @@ function ui() {
     }
     updateSum();
     $('.sum').innerHTML = `<b>${ok} af ${todo.length} ${todo.length === 1 ? 'vare' : 'varer'} ligger i kurven.</b> Gå til kurven for at sætte ordrereference og bestille.`;
+    // The overview's selection is done once everything from it is in the cart.
+    if (wish && [...wishSet].every(c => cart[c])) { LS.set(WISH_KEY, null); wish = null; $('.wish').innerHTML = '<b>Valget fra kasseoversigten ligger nu i kurven.</b>'; }
   };
 
+  applyWish();
   render();
 })();
 

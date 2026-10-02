@@ -61,7 +61,7 @@ const BOXES = {
   '704302': ['kor', 'Bundkortkasse', '675×576×152', 'ok'],
   '704336': ['kor', 'Bundkort-indlæg (Korrvu)', '785×1116', 'ok'],
   '704335': ['fold', 'Foldekasse 2,5"', '513×336', 'ok'],
-  '704337': ['fold', 'Foldekasse 3,5"', '', 'ok'],
+  '704337': ['fold', 'Foldekasse 3,5"', '260×180×40', 'ok'],
   '746306': ['fold', 'Større foldekasse', '', 'ok'],
   // Not a box, but the export has no description for it: name from the BC invoice text.
   '704389': ['tape', 'LDPE-folie', '', 'bc']
