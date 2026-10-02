@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -20,6 +20,8 @@ const LONG_WARN = 21; // days ahead that long-lead items are always shown
 const stockOpts = () => { const s = LS.get(STOCK_KEY) || {}, o = {}; for (const [k, v] of Object.entries(s)) if (v && v.pallets >= 0 && v.per > 0) o[k] = { base: v.pallets * v.per, at: v.at }; return o; };
 const fmtTime = t => new Date(t).toLocaleString('da-DK', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDate = t => new Date(t).toLocaleDateString('da-DK', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+const fmtDay = t => new Date(t).toLocaleDateString('da-DK', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+const isoWeek = t => { const d = new Date(t), day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3); const y = new Date(Date.UTC(d.getUTCFullYear(), 0, 4)); return 1 + Math.round(((d - y) / DAY - 3 + ((y.getUTCDay() + 6) % 7)) / 7); };
 const fmtNum = n => Math.round(n).toLocaleString('da-DK');
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -104,13 +106,6 @@ function ui() {
     header .src { display: block; color: #A9B6C3; font-size: 12px; margin-top: 2px }
     .x { border: 0; background: rgba(255,255,255,.12); color: #fff; font-size: 20px; width: 34px; height: 34px; border-radius: 8px; cursor: pointer; line-height: 1 }
     .x:hover { background: rgba(255,255,255,.22) }
-    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 14px 20px 4px }
-    .stat { text-align: left; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 10px 12px; cursor: pointer; font: inherit; color: inherit; border-left: 4px solid var(--line) }
-    .stat:hover { border-color: var(--green) } .stat .n { display: block; font-size: 24px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums } .stat .l { color: var(--muted); font-size: 12.5px }
-    .stat.s-now { border-left-color: var(--now) } .stat.s-now .n { color: var(--now) }
-    .stat.s-soon { border-left-color: var(--yellow) } .stat.s-long { border-left-color: var(--now) } .stat.s-way { border-left-color: var(--info) } .stat.s-cart { border-left-color: var(--green) }
-    .stat.zero .n { color: var(--muted) !important }
-    .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 20px }
     .msg { padding: 12px 20px; color: var(--muted) }
     .msg.err { color: var(--now); font-weight: 600 }
     .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--card) }
@@ -128,7 +123,11 @@ function ui() {
     .grp h3 i { width: 10px; height: 10px; border-radius: 3px; background: var(--green); display: inline-block; align-self: center }
     .grp.box h3 i { background: var(--navy) }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden }
-    table { border-collapse: collapse; width: 100% }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; min-width: 900px }
+    .card { overflow-x: auto }
+    .main th:nth-child(1) { width: 40px } .main th:nth-child(3) { width: 130px } .main th:nth-child(4) { width: 200px } .main th:nth-child(5) { width: 120px } .main th:nth-child(6) { width: 160px } .main th:nth-child(7) { width: 120px }
+    .stockp table { table-layout: auto; min-width: 0 }
+    .cov { max-width: 100% }
     th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle }
     tbody tr:last-child td { border-bottom: 0 }
     th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; background: var(--soft) }
@@ -159,8 +158,6 @@ function ui() {
     label.all { display: inline-flex; gap: 6px; align-items: center; cursor: pointer }
     .spacer { flex: 1 }
     .note { margin: 10px 20px 0; padding: 10px 14px; border-radius: 10px; font-size: 13.5px }
-    .next { background: var(--info-bg); color: #13355C } .next span { color: var(--info) }
-    .long { background: var(--now-bg); color: #7A1A14 }
     .warn { background: var(--soon-bg); color: var(--soon) }
     .warn button { margin-left: 8px; border: 1px solid var(--soon); background: #fff; color: var(--soon); border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit }
     .year h4, .ordered h4 { margin: 18px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
@@ -170,24 +167,51 @@ function ui() {
     .stockp p { margin: 8px 0 10px; color: var(--muted) }
     .save { background: var(--navy); color: #fff; border: 0; border-radius: 9px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px }
     .muted { color: var(--muted) }
-    @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)) } .cov { width: 110px } }
+    .hero, .weeks, .tabs, .note, header, footer { flex-shrink: 0 }
+    .hero { display: flex; gap: 12px; align-items: stretch; padding: 14px 20px 0 }
+    .leads { flex: 1; display: grid; gap: 8px; min-width: 0 }
+    .lead { background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--green); border-radius: 10px; padding: 10px 14px; display: grid; gap: 2px }
+    .lead .big { font-size: 18px; font-weight: 700 } .lead.now { border-left-color: var(--now); background: var(--now-bg) } .lead.now .big { color: var(--now) }
+    .lead.long { border-left-color: var(--yellow); padding: 8px 14px; font-size: 13.5px }
+    .minis { display: grid; gap: 8px; align-content: start }
+    .mini { font: inherit; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; cursor: pointer; color: var(--muted); white-space: nowrap }
+    .mini b { color: var(--ink); font-size: 18px; margin-right: 4px } .mini:hover { border-color: var(--green) }
+    .weeks { display: flex; gap: 6px; align-items: stretch; padding: 12px 20px 2px; overflow-x: auto }
+    .weeks .wl { align-self: center; color: var(--muted); font-size: 12.5px; margin-right: 4px; white-space: nowrap }
+    .wk { position: relative; flex: 1; min-width: 78px; font: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px; cursor: pointer; display: grid; text-align: center; color: var(--ink) }
+    .wk .wn { font-size: 11.5px; color: var(--muted); white-space: nowrap } .wk .wc { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums }
+    .wk.none .wc { color: var(--line) } .wk.sel { background: #E6F7F0; border-color: var(--green) } .wk.late .wc { color: var(--now) }
+    .wk .dot { position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--now) }
+    .wk:hover { border-color: var(--green-d) }
+    .tabs { align-items: center; margin-top: 10px } .tabs .find { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; width: 210px; margin-left: 10px; background: #fff }
+    .intro { color: var(--muted); margin: 12px 0 0 }
+    .empty { margin: 18px 0; padding: 18px; background: var(--card); border: 1px dashed var(--line); border-radius: 10px; color: var(--muted) } .empty b { color: var(--ink) }
+    .when b { display: block; font-size: 14.5px; white-space: nowrap } .when small { color: var(--muted); font-size: 12px; white-space: nowrap }
+    .when.w-now b, .when.w-now small { color: var(--now) } .when.w-soon b { color: var(--soon) }
+    .use { white-space: nowrap } .use b { font-weight: 600 } .use small { display: block; color: var(--muted); font-size: 12px }
+    button.i { font: italic 700 11px Georgia, serif; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--soft); color: var(--muted); cursor: pointer; vertical-align: 2px; margin-left: 4px; padding: 0 }
+    button.i[aria-expanded=true] { background: var(--navy); color: #fff; border-color: var(--navy) }
+    .more { margin-top: 6px; padding: 8px 10px; background: var(--soft); border-radius: 8px; font-size: 12.5px; max-width: 70ch } .more p { margin: 0 0 4px }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 10px }
+    .bx { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; border-top: 4px solid var(--green) }
+    .bx.st-soon { border-top-color: var(--yellow) } .bx.st-now { border-top-color: var(--now) } .bx.st-idle { border-top-color: var(--line) } .bx.on { box-shadow: 0 0 0 2px var(--green) }
+    .bx-h { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start } .bx-h .nm { font-size: 16px } .bx-h .when { text-align: right }
+    .bx-m { color: var(--muted); font-size: 12.5px }
+    .bx-f { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px }
+    .bx-f .qty small { display: block } label.pick { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-weight: 600 }
+    .bx .res { font-size: 12.5px; font-weight: 600 } .bx .res:empty { display: none }
+    .cov.big { width: auto } .cov.big .track { height: 12px } .cov .fill.idle { background: var(--line) }
+    @media (max-width: 760px) { .hero { flex-direction: column } .cov { width: 110px } }
   </style>
   <div class="w">
   <div class="back"></div>
   <div class="win" role="dialog" aria-label="Renewtech Antalis-bestilling">
     <header><div><b>Antalis-bestilling</b><small>Renewtech · v${APP_VERSION}</small><span class="src"></span></div><button class="x" title="Luk" aria-label="Luk">×</button></header>
-    <div class="stats" hidden></div>
-    <div class="note next" hidden></div>
-    <div class="note long" hidden></div>
+    <div class="hero" hidden></div>
     <div class="note warn" hidden></div>
-    <div class="bar" hidden>
-      <span class="hz" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap"><span>Bestil inden for</span>
-      <div class="seg"><button data-h="7" aria-pressed="true">7 dage</button><button data-h="14" aria-pressed="false">14 dage</button><button data-h="30" aria-pressed="false">30 dage</button></div>
-      <label class="all"><input type="checkbox" class="showall"> Vis alle varer</label></span>
-      <span class="spacer"></span>
-      <input class="find" type="search" placeholder="Søg navn eller varenr." aria-label="Søg" style="font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:9px;width:210px">
-    </div>
-    <div class="tabs" hidden><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="boxes" aria-pressed="false">Kasser</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="ordered" aria-pressed="false">Bestilt</button><button data-v="stock" aria-pressed="false">Lager</button></div>
+    <div class="weeks" hidden></div>
+    <div class="tabs" hidden><button data-v="list" aria-pressed="true">Bestil nu</button><button data-v="boxes" aria-pressed="false">Kasser</button><button data-v="year" aria-pressed="false">Årsplan</button><button data-v="ordered" aria-pressed="false">Bestilt</button><button data-v="stock" aria-pressed="false">Lager</button>
+      <span class="spacer"></span><label class="all"><input type="checkbox" class="showall"> Vis alle varer</label><input class="find" type="search" placeholder="Søg navn eller varenr." aria-label="Søg"></div>
     <div class="msg">Starter…</div>
     <div class="scroll year" hidden></div>
     <div class="scroll stockp" hidden></div>
@@ -264,138 +288,182 @@ function ui() {
     }
     return picks.get(it.code);
   };
-  const statusPill = it => {
-    const p = it.plan;
-    if (!p) return `<span class="pill plain">Kun ${it.orders} køb</span>`;
-    if (it.inactive) return `<span class="pill plain">Ikke købt siden ${fmtDate(it.last.date)}</span>`;
-    if (it.state === 'now') return `<span class="pill now">${p.daysLeft < 0 ? 'Bestil nu · ' + -p.daysLeft + ' dage over' : 'Bestil i dag'}</span>`;
-    if (it.state === 'soon') return `<span class="pill soon">Bestil senest ${fmtDate(p.orderBy)}</span>`;
-    return `<span class="pill ok">OK · bestil ${fmtDate(p.orderBy)}</span>`;
+  // When it must be ordered, said the way people say it: weekday and date, then how far away.
+  // Whole calendar days from today to the day of t (plan dates can carry a time of day).
+  const endDot = t => /\.$/.test(t) ? t : t + '.';
+  const dayDiff = t => Math.floor((t - todayUTC) / DAY);
+  const rel = n => n < 0 ? `${-n} ${-n === 1 ? 'dag' : 'dage'} for sent` : n === 0 ? 'i dag' : n === 1 ? 'i morgen' : `om ${n} dage`;
+  const whenCell = it => {
+    if (!it.plan) return `<div class="when"><b class="muted">Kan ikke beregnes</b><small>Kun ${it.orders} køb</small></div>`;
+    if (it.inactive) return `<div class="when"><b class="muted">Ikke i brug?</b><small>Ikke købt siden ${fmtDate(it.last.date)}</small></div>`;
+    const p = it.plan, cls = it.state === 'now' ? 'w-now' : it.state === 'soon' ? 'w-soon' : 'w-ok';
+    const d = dayDiff(p.orderBy);
+    return `<div class="when ${cls}"><b>${d <= 0 ? 'Bestil nu' : fmtDay(p.orderBy)}</b><small>${d < 0 ? rel(d) : d === 0 ? 'senest i dag' : rel(d)}</small></div>`;
   };
   const weekTxt = it => { const week = (it.rateUsed || it.rate) * 7; return week >= 10 ? fmtNum(week) : week.toFixed(1).replace('.', ','); };
+  const useCell = it => it.plan ? `<div class="use"><b>${weekTxt(it)}</b> ${BASE_WORD(it)}/uge<small>lev.tid ${it.plan.lead} d</small></div>` : `<div class="use muted">–<small>lev.tid ${it.lead} d</small></div>`;
   const why = it => {
     if (!it.plan) return `Købt ${it.orders} gang: ${fmtNum(it.last.base)} ${BASE_WORD(it)} ${fmtDate(it.last.date)}. Forbruget kan først regnes efter næste køb, eller skriv det under “Lager”.`;
     const bw = BASE_WORD(it);
-    const leadTxt = it.longLead ? `lev.tid op til ${it.plan.lead} d + ${it.plan.buffer} d buffer` : `lev.tid ${it.lead} d`;
-    const trendTxt = it.trend && Math.abs(it.trend - 1) >= 0.03 ? ` (udvikling ${it.trend > 1 ? '+' : ''}${Math.round((it.trend - 1) * 100)} %/md)` : '';
-    const useTxt = it.rateManual ? 'bruger (indtastet)' : it.overbought ? 'normalt forbrug ca.' : 'bruger ca.';
+    const leadTxt = it.longLead ? `leveringstid op til ${it.plan.lead} dage + ${it.plan.buffer} dages buffer` : `leveringstid ${it.lead} ${it.lead === 1 ? 'dag' : 'dage'} + ${it.plan.buffer} dages buffer`;
+    const trendTxt = it.trend && Math.abs(it.trend - 1) >= 0.03 ? ` Forbruget ${it.trend > 1 ? 'stiger' : 'falder'} ca. ${Math.abs(Math.round((it.trend - 1) * 100))} % om måneden.` : '';
     const s = (LS.get(STOCK_KEY) || {})[it.code];
-    if (it.counted && s) return `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}) · nu ca. ${fmtNum(it.stockNow)} ${bw} · ${useTxt} ${weekTxt(it)} ${bw}/uge${trendTxt} · ${leadTxt}`;
-    return `${useTxt[0].toUpperCase() + useTxt.slice(1)} ${weekTxt(it)} ${bw}/uge${trendTxt} · sidst ${fmtDate(it.last.date)} (${fmtNum(it.last.base)} ${bw}) · ${leadTxt}`;
+    const base = it.counted && s ? `Lager talt ${fmtDate(s.at)}: ${String(s.pallets).replace('.', ',')} paller (${fmtNum(s.pallets * s.per)} ${bw}), nu ca. ${fmtNum(it.stockNow)} ${bw}. ` : `Sidst bestilt ${fmtDate(it.last.date)}: ${fmtNum(it.last.base)} ${bw}. `;
+    const use = it.rateManual ? `I har skrevet forbruget: ${weekTxt(it)} ${bw}/uge.` : it.overbought ? `Normalt forbrug ca. ${weekTxt(it)} ${bw}/uge (der er købt ekstra for nylig).` : `I bruger ca. ${weekTxt(it)} ${bw}/uge.`;
+    return `${base}${use}${trendTxt} Lageret løber tør ca. ${endDot(fmtDay(it.plan.runout))} Med ${leadTxt} skal den bestilles senest ${endDot(fmtDay(it.plan.orderBy))}`;
   };
   // How long the stock lasts (including what is on its way), against how early it must be ordered.
   const COV_MAX = 120;
-  const cover = it => {
+  const cover = (it, big) => {
     if (!it.plan) return '<span class="cov-none">Kan ikke beregnes endnu</span>';
-    const left = Math.round((it.plan.runout - todayUTC) / DAY), need = it.plan.lead + it.plan.buffer;
+    const left = dayDiff(it.plan.runout), need = it.plan.lead + it.plan.buffer;
     const w = Math.max(0, Math.min(left, COV_MAX)) / COV_MAX * 100, m = Math.min(need, COV_MAX) / COV_MAX * 100;
-    const cls = it.inactive ? '' : it.state === 'now' ? 'now' : it.state === 'soon' ? 'soon' : '';
-    const title = `Løber tør ca. ${fmtDate(it.plan.runout)} (inkl. det der er på vej). Skal bestilles ${need} dage før: lev.tid ${it.plan.lead} d + ${it.plan.buffer} d buffer.`;
-    return `<div class="cov" title="${esc(title)}"><div class="track"><i class="fill ${cls}" style="width:${w}%"></i><b class="mark" style="left:${m}%"></b></div><div class="t"><span>${left <= 0 ? '<b>Tom nu</b>' : `<b>${left > COV_MAX ? COV_MAX + '+' : left} dage</b>`}</span><span>tør ${fmtDate(it.plan.runout)}</span></div></div>`;
+    const cls = it.inactive ? 'idle' : it.state === 'now' ? 'now' : it.state === 'soon' ? 'soon' : '';
+    const title = `Løber tør ca. ${fmtDay(it.plan.runout)} (inkl. det der er på vej). Den sorte streg: skal bestilles ${need} dage før.`;
+    return `<div class="cov${big ? ' big' : ''}" title="${esc(title)}"><div class="track"><i class="fill ${cls}" style="width:${w}%"></i><b class="mark" style="left:${m}%"></b></div><div class="t"><span>${left <= 0 ? '<b>Tom nu</b>' : `<b>${left > COV_MAX ? COV_MAX + '+' : left} dage</b>`}</span><span>tør ${fmtDate(it.plan.runout)}</span></div></div>`;
   };
-  const flagsOf = it => [
-    CONF_PILL[it.conf] || '',
-    it.unique && !it.name ? '<span class="pill uniq">Kundeunik</span>' : '',
+  // The few flags that change what you do go on the row; the rest sit under (i).
+  const mainFlags = it => [
     it.longLead ? `<span class="pill now">Lang lev.tid · ${it.plan ? it.plan.lead : it.lead} d</span>` : '',
-    it.overbought ? `<span class="pill soon" title="Købt ${fmtNum(it.overbought.recentBase)} ${BASE_WORD(it)} de sidste 60 dage mod normalt ca. ${fmtNum(it.overbought.normal)}">Købt meget for nylig · tæl lageret</span>` : '',
-    it.plan && it.plan.holiday ? `<span class="pill soon">Bestil før ${esc(it.plan.holiday)}</span>` : '',
-    it.sentAfter ? `<span class="pill info">Lagt i kurven af bogmærket ${fmtTime(it.sentAfter.at)}</span>` : '',
-    it.onTheWay ? `<span class="pill info">På vej · lev. ${fmtDate(it.onTheWay)}</span>` : '',
-    it.plan && it.plan.lowData ? `<span class="pill plain">Kun ${it.orders} køb</span>` : '',
-    it.assumed.length ? '<span class="pill plain">Omregning anslået</span>' : ''
+    it.onTheWay ? `<span class="pill info">På vej · ${fmtDate(it.onTheWay)}</span>` : '',
+    it.sentAfter ? `<span class="pill info">Lagt i kurven ${fmtTime(it.sentAfter.at)}</span>` : '',
+    it.overbought ? `<span class="pill soon" title="Købt ${fmtNum(it.overbought.recentBase)} ${BASE_WORD(it)} de sidste 60 dage mod normalt ca. ${fmtNum(it.overbought.normal)}">Købt ekstra for nylig</span>` : '',
+    it.plan && it.plan.holiday ? `<span class="pill soon">Før ${esc(it.plan.holiday)}</span>` : '',
+    CONF_PILL[it.conf] || ''
   ].join('');
-  const rowHtml = it => {
-    const p = pickFor(it), f = factorOf(it), c = cart[it.code], u = unitOf(it);
-    const price = it.unitPrice ? `<small>ca. DKK ${fmtKr(p.qty * f * it.unitPrice)}</small>` : '';
-    const sub = [`<a href="${WS}html/catalog/resultPage?keyWord=${esc(it.code)}" target="_blank">${esc(it.code)}</a>`, it.dims ? `<span class="dim">${esc(it.dims)}</span>` : '', it.name && it.title && !/ingen beskrivelse/.test(it.title) ? esc(it.title.slice(0, 60)) : ''].filter(Boolean).join(' · ');
-    return `<tr data-code="${esc(it.code)}" class="${p.on ? '' : 'off'}">
-      <td style="width:28px"><input type="checkbox" aria-label="Vælg ${esc(nameOf(it))}" ${p.on ? 'checked' : ''} ${c ? 'disabled title="Ligger allerede i kurven"' : ''}></td>
-      <td><div class="nm">${esc(nameOf(it))}</div><div class="meta">${sub}</div><span class="why">${why(it)}</span><div class="flags">${flagsOf(it)}</div></td>
-      <td>${cover(it)}</td>
-      <td style="white-space:nowrap">${statusPill(it)}</td>
-      <td class="qty"><input type="number" min="0" value="${p.qty}" aria-label="Antal"> ${esc(unitDa(u, p.qty))}${f > 1 ? `<small>= ${fmtNum(p.qty * f)} ${BASE_WORD(it)}</small>` : ''}${price}</td>
-      <td class="res">${c ? `<span style="color:var(--info)">I kurven: ${c.qty} ${esc(UNIT_DA[c.unit] ? unitDa(c.unit, c.qty) : c.unit)}</span>` : ''}</td></tr>`;
+  const moreFlags = it => [
+    it.unique ? '<span class="pill uniq">Kundeunik vare</span>' : '',
+    it.plan && it.plan.lowData ? `<span class="pill plain">Kun ${it.orders} køb</span>` : '',
+    it.assumed.length ? '<span class="pill plain">Omregning af enhed anslået</span>' : ''
+  ].join('');
+  const subOf = it => [`<a href="${WS}html/catalog/resultPage?keyWord=${esc(it.code)}" target="_blank" title="Åbn varen hos Antalis">#${esc(it.code)}</a>`, it.dims ? `<span class="dim">${esc(it.dims)}</span>` : ''].filter(Boolean).join(' · ');
+  const qtyHtml = it => {
+    const p = pickFor(it), f = factorOf(it), u = unitOf(it);
+    return `<input type="number" min="0" value="${p.qty}" aria-label="Antal"> ${esc(unitDa(u, p.qty))}<small class="q-base">${f > 1 ? `= ${fmtNum(p.qty * f)} ${BASE_WORD(it)}` : ''}</small><small class="q-kr">${it.unitPrice ? `ca. DKK ${fmtKr(p.qty * f * it.unitPrice)}` : ''}</small>`;
   };
-  const groupsHtml = (list, emptyTxt) => {
-    if (!list.length) return `<p class="muted" style="margin:16px 0">${emptyTxt}</p>`;
+  const cartTxt = it => { const c = cart[it.code]; return c ? `<span style="color:var(--info)">I kurven: ${c.qty} ${esc(UNIT_DA[c.unit] ? unitDa(c.unit, c.qty) : c.unit)}</span>` : ''; };
+  const checkHtml = it => { const p = pickFor(it), c = cart[it.code]; return `<input type="checkbox" aria-label="Vælg ${esc(nameOf(it))}" ${p.on ? 'checked' : ''} ${c ? 'disabled title="Ligger allerede i kurven"' : ''}>`; };
+  const rowHtml = it => {
+    const p = pickFor(it), full = it.name && it.title && !/ingen beskrivelse/.test(it.title) ? it.title : '';
+    return `<tr data-code="${esc(it.code)}" class="${p.on ? '' : 'off'}">
+      <td style="width:28px">${checkHtml(it)}</td>
+      <td><div class="nm">${esc(nameOf(it))} <button class="i" type="button" aria-expanded="false" title="Hvorfor?">i</button></div><div class="meta">${subOf(it)}</div>${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
+        <div class="more" hidden><p>${why(it)}</p>${full ? `<p class="muted">Antalis: ${esc(full.slice(0, 140))}</p>` : ''}${moreFlags(it)}</div></td>
+      <td>${whenCell(it)}</td>
+      <td>${cover(it)}</td>
+      <td>${useCell(it)}</td>
+      <td class="qty">${qtyHtml(it)}</td>
+      <td class="res">${cartTxt(it)}</td></tr>`;
+  };
+  const cardHtml = it => {
+    const p = pickFor(it), cls = 'st-' + (!it.plan || it.inactive ? 'idle' : it.state);
+    return `<div class="bx ${cls}${p.on ? ' on' : ''}" data-code="${esc(it.code)}">
+      <div class="bx-h"><div><div class="nm">${esc(nameOf(it))}</div><div class="meta">${subOf(it)}</div></div>${whenCell(it)}</div>
+      ${cover(it, true)}
+      <div class="bx-m">${it.plan ? `${weekTxt(it)} ${BASE_WORD(it)}/uge · lev.tid ${it.plan.lead} d` : `Kun ${it.orders} køb · lev.tid ${it.lead} d`}</div>
+      ${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
+      <div class="bx-f"><label class="pick">${checkHtml(it)} Vælg</label><span class="qty">${qtyHtml(it)}</span></div>
+      <div class="res">${cartTxt(it)}</div></div>`;
+  };
+  const groupsHtml = (list, emptyTxt, cards) => {
+    if (!list.length) return `<div class="empty">${emptyTxt}</div>`;
     return GROUPS.map(g => {
       const rows = list.filter(it => it.group === g.id);
       if (!rows.length) return '';
       const due = rows.filter(it => it.plan && !it.inactive && it.state !== 'ok').length;
-      return `<div class="grp ${g.box ? 'box' : ''}"><h3><i></i>${esc(g.name)}<span>${rows.length} varer${due ? ' · ' + due + ' skal bestilles' : ''}</span></h3>
-        <div class="card"><table><thead><tr><th></th><th>Vare</th><th>Lageret rækker</th><th>Status</th><th style="text-align:right">Antal</th><th>Kurv</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody></table></div></div>`;
+      const head = `<h3><i></i>${esc(g.name)}<span>${rows.length} ${rows.length === 1 ? 'vare' : 'varer'}${due ? ` · <b>${due} skal bestilles</b>` : ''}</span></h3>`;
+      if (cards) return `<div class="grp box">${head}<div class="cards">${rows.map(cardHtml).join('')}</div></div>`;
+      return `<div class="grp ${g.box ? 'box' : ''}">${head}
+        <div class="card"><table><thead><tr><th></th><th>Vare</th><th>Bestil senest</th><th>Lageret rækker</th><th>Forbrug</th><th style="text-align:right">Antal</th><th></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody></table></div></div>`;
     }).join('');
   };
   const matches = it => !query || it.code.includes(query) || (nameOf(it) + ' ' + it.title + ' ' + it.dims).toLowerCase().includes(query);
 
+  // Weeks: this week and the next seven, Monday to Sunday. The chosen week sets how far ahead the list looks.
+  const DOW = (new Date(todayUTC).getUTCDay() + 6) % 7, WEEK0 = todayUTC - DOW * DAY, WEEKS = 8;
+  let weekSel = 1;
+  const horizonFor = w => Math.round((WEEK0 + (w + 1) * 7 * DAY - DAY - todayUTC) / DAY);
+  horizon = horizonFor(weekSel);
+
   const render = () => {
     plan(items, todayUTC, { horizon, stock: stockOpts(), rate: rateOpts(), closed: closedNow() });
     const live = it => it.plan && !it.inactive && !cart[it.code] && !it.sentAfter;
-    // Long lead time: always warn three weeks ahead, whatever the chosen period.
-    const longDue = items.filter(it => live(it) && it.longLead && it.plan.daysLeft <= LONG_WARN).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
-    const nowN = items.filter(it => live(it) && it.state === 'now' && !it.onTheWay).length;
-    const soonN = items.filter(it => live(it) && it.plan.daysLeft > 0 && it.plan.daysLeft <= horizon).length;
+    const planned = items.filter(it => live(it) && (it.orders >= 3 || it.counted || it.rateManual || it.longLead)).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
+    const nowList = planned.filter(it => it.plan.daysLeft <= 0 && !it.onTheWay);
+    const longDue = items.filter(it => live(it) && it.longLead && it.plan.daysLeft > 0 && it.plan.daysLeft <= LONG_WARN);
+    const names = (g, n = 3) => g.slice(0, n).map(it => `<b>${esc(nameOf(it))}</b>`).join(', ') + (g.length > n ? ` og ${g.length - n} mere` : '');
+    // The one sentence that says what to do today.
+    let lead;
+    if (nowList.length) lead = `<div class="lead now"><span class="big">${nowList.length} ${nowList.length === 1 ? 'vare skal' : 'varer skal'} bestilles nu</span><span>${names(nowList, 4)}</span></div>`;
+    else if (planned.length) {
+      const first = planned[0], same = planned.filter(it => it.plan.orderBy <= first.plan.orderBy + 3 * DAY);
+      lead = `<div class="lead"><span class="big">Intet skal bestilles i dag</span><span>Næste bestilling senest <b>${fmtDay(first.plan.orderBy)}</b> (${rel(dayDiff(first.plan.orderBy))}): ${names(same)}</span></div>`;
+    } else lead = `<div class="lead"><span class="big">Intet skal bestilles</span><span>Ingen varer har nok køb til en plan endnu.</span></div>`;
+    if (longDue.length) lead += `<div class="lead long"><span>Lang leveringstid: ${longDue.map(it => `<b>${esc(nameOf(it))}</b> senest ${fmtDay(it.plan.orderBy)}`).join(' · ')}</span></div>`;
     const wayN = items.filter(it => it.onTheWay).length, cartN = Object.keys(cart).length;
-    const stat = (cls, n, l, go) => `<button class="stat ${cls}${n ? '' : ' zero'}" data-go="${go}"><span class="n">${n}</span><span class="l">${l}</span></button>`;
-    $('.stats').hidden = false;
-    $('.stats').innerHTML = stat('s-now', nowN, 'Bestil nu', 'list') + stat('s-soon', soonN, `Bestil inden for ${horizon} dage`, 'list')
-      + stat('s-long', longDue.length, 'Lang lev.tid inden for 3 uger', 'list') + stat('s-way', wayN, 'Varer på vej', 'ordered') + stat('s-cart', cartN, 'Varer i kurven', 'ordered');
+    $('.hero').hidden = false;
+    $('.hero').innerHTML = `<div class="leads">${lead}</div><div class="minis"><button class="mini" data-go="ordered"><b>${wayN}</b> på vej</button><button class="mini" data-go="ordered"><b>${cartN}</b> i kurven</button></div>`;
+    // Week timeline.
+    const buckets = Array.from({ length: WEEKS }, () => []);
+    for (const it of planned) { const w = Math.max(0, Math.floor((it.plan.orderBy - WEEK0) / (7 * DAY))); if (w < WEEKS) buckets[w].push(it); }
+    $('.weeks').hidden = false;
+    $('.weeks').innerHTML = `<span class="wl">Skal bestilles i</span>` + buckets.map((b, w) => {
+      const late = b.some(it => it.plan.daysLeft <= 0), lng = b.some(it => it.longLead);
+      const label = w === 0 ? 'Denne uge' : w === 1 ? 'Næste uge' : 'Uge ' + isoWeek(WEEK0 + w * 7 * DAY);
+      const tip = b.length ? b.map(it => nameOf(it)).join(', ') : 'Intet';
+      return `<button class="wk${w <= weekSel ? ' sel' : ''}${late ? ' late' : ''}${b.length ? '' : ' none'}" data-w="${w}" title="${esc(tip)}"><span class="wn">${label}</span><span class="wc">${b.length || '–'}</span>${lng ? '<i class="dot" title="Lang leveringstid"></i>' : ''}</button>`;
+    }).join('');
+    U.root.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { weekSel = +b.dataset.w; horizon = horizonFor(weekSel); picks.clear(); setView('list'); });
     U.root.querySelectorAll('[data-go]').forEach(b => b.onclick = () => setView(b.dataset.go));
-    $('.long').hidden = !longDue.length;
-    $('.long').innerHTML = longDue.length ? '<b>Lang leveringstid · bestil i god tid:</b> ' + longDue.map(it => `${esc(nameOf(it))} <span class="muted">#${esc(it.code)}</span> (${it.plan.lead} d) ${it.plan.daysLeft <= 0 ? '<b>nu</b>' : 'senest <b>' + fmtDate(it.plan.orderBy) + '</b>'}`).join(' · ') : '';
-    // When is the next order? Group items whose order-by dates fall within 3 days of the earliest.
-    const due = items.filter(it => live(it) && (it.orders >= 3 || it.counted || it.rateManual || it.longLead)).sort((a, b) => a.plan.orderBy - b.plan.orderBy);
-    if (due.length) {
-      const d0 = due[0].plan.orderBy, g1 = due.filter(it => it.plan.orderBy <= d0 + 3 * DAY);
-      const rest = due.filter(it => it.plan.orderBy > d0 + 3 * DAY), d1 = rest.length ? rest[0].plan.orderBy : null, g2 = d1 ? rest.filter(it => it.plan.orderBy <= d1 + 3 * DAY) : [];
-      const names = g => g.slice(0, 4).map(it => esc(nameOf(it))).join(', ') + (g.length > 4 ? ` og ${g.length - 4} mere` : '');
-      const when = t => t <= todayUTC ? '<b>nu</b>' : `senest <b>${fmtDate(t)}</b>`;
-      $('.next').hidden = false;
-      $('.next').innerHTML = `<b>Næste bestilling</b> ${when(d0)}: ${names(g1)}` + (d1 ? `<br><span>Derefter ${when(d1)}: ${names(g2)}</span>` : '');
-    } else $('.next').hidden = true;
-    $('.bar').hidden = false; $('.tabs').hidden = false;
-    $('.hz').style.visibility = view === 'list' ? '' : 'hidden';
+    $('.tabs').hidden = false;
     $('.find').hidden = !(view === 'list' || view === 'boxes');
+    $('label.all').hidden = view !== 'list';
     const mainView = view === 'list' || view === 'boxes';
     $('.main').hidden = !mainView; $('.year').hidden = view !== 'year'; $('.stockp').hidden = view !== 'stock'; $('.ordered').hidden = view !== 'ordered';
     $('footer').hidden = !mainView;
     U.msg('');
     if (!mainView) return view === 'year' ? renderYear() : view === 'ordered' ? renderOrdered() : renderStock();
-    let list, empty;
+    const untilTxt = weekSel === 0 ? 'i denne uge' : weekSel === 1 ? 'til og med næste uge' : 'til og med uge ' + isoWeek(WEEK0 + weekSel * 7 * DAY);
+    let html;
     if (view === 'boxes') {
-      list = items.filter(it => GROUP[it.group] && GROUP[it.group].box && matches(it)).sort((a, b) => (a.plan ? a.plan.orderBy : Infinity) - (b.plan ? b.plan.orderBy : Infinity));
-      empty = 'Ingen kasser fundet.';
+      const list = items.filter(it => GROUP[it.group] && GROUP[it.group].box && matches(it)).sort((a, b) => (a.plan && !a.inactive ? a.plan.orderBy : Infinity) - (b.plan && !b.inactive ? b.plan.orderBy : Infinity));
+      html = `<p class="intro">Alle jeres kasser. Baren viser hvor mange dage lageret rækker, inkl. det der er på vej. Når den farvede del når den sorte streg, skal kassen bestilles.</p>` + groupsHtml(list, 'Ingen kasser fundet.', true);
     } else {
-      list = items.filter(it => matches(it) && it.plan && (showAll || query || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
-      const next = items.filter(it => it.plan && !it.inactive && it.plan.daysLeft > horizon).sort((a, b) => a.plan.orderBy - b.plan.orderBy)[0];
-      empty = `Intet skal bestilles inden for ${horizon} dage.` + (next ? ` Næste er ${esc(nameOf(next))} senest ${fmtDate(next.plan.orderBy)}.` : '');
+      const list = items.filter(it => matches(it) && it.plan && (showAll || query || (!it.inactive && (it.plan.daysLeft <= horizon || (it.longLead && it.plan.daysLeft <= LONG_WARN))) || cart[it.code])).sort((a, b) => (a.inactive - b.inactive) || (a.plan.orderBy - b.plan.orderBy));
+      const next = planned.find(it => it.plan.daysLeft > horizon);
+      const empty = `<b>Intet skal bestilles ${untilTxt}.</b>` + (next ? `<br>Næste er ${esc(nameOf(next))} senest ${fmtDay(next.plan.orderBy)}. Vælg en senere uge ovenfor for at se den.` : '');
+      html = (list.length && !showAll && !query ? `<p class="intro">Varer der skal bestilles ${untilTxt}. Varer med flueben er klar til kurven. Tryk på <b>i</b> for at se udregningen.</p>` : '') + groupsHtml(list, empty, false);
     }
-    const intro = view === 'boxes' ? `<p class="muted" style="margin:10px 0 0">Alle kassetyper I køber, sorteret efter hvornår de skal bestilles. Baren viser hvor mange dage lageret rækker (inkl. det der er på vej). Stregen er hvor tidligt der skal bestilles på grund af leveringstiden.</p>` : '';
-    $('.main').innerHTML = intro + groupsHtml(list, empty);
+    $('.main').innerHTML = html;
     updateSum();
   };
   const chosen = () => items.filter(it => picks.get(it.code)?.on && picks.get(it.code).qty > 0 && !cart[it.code]);
   const updateSum = () => {
     const c = chosen(), n = c.length;
     const kr = c.reduce((s, it) => s + (it.unitPrice ? picks.get(it.code).qty * factorOf(it) * it.unitPrice : 0), 0);
-    $('.sum').innerHTML = n ? `<b>${n} ${n === 1 ? 'vare' : 'varer'} valgt</b>${kr ? ` · ca. DKK ${fmtKr(kr)} ekskl. moms (seneste pris)` : ''}` : 'Ingen varer valgt';
+    $('.sum').innerHTML = n ? `<b>${n} ${n === 1 ? 'vare' : 'varer'} valgt</b>${kr ? ` · ca. DKK ${fmtKr(kr)} ekskl. moms` : ''}` : 'Ingen varer valgt';
     $('.go').disabled = !n;
   };
 
+  $('.main').addEventListener('click', e => {
+    const b = e.target.closest('button.i'); if (!b) return;
+    const more = b.closest('td').querySelector('.more'), open = more.hidden;
+    more.hidden = !open; b.setAttribute('aria-expanded', open);
+  });
   $('.main').addEventListener('change', e => {
-    const tr = e.target.closest('tr[data-code]'); if (!tr) return;
-    const p = picks.get(tr.dataset.code);
-    if (e.target.type === 'checkbox') { p.on = e.target.checked; tr.classList.toggle('off', !p.on); }
+    const row = e.target.closest('[data-code]'); if (!row) return;
+    const p = picks.get(row.dataset.code);
+    if (e.target.type === 'checkbox') { p.on = e.target.checked; row.classList.toggle('off', !p.on); row.classList.toggle('on', p.on); }
     if (e.target.type === 'number') {
       p.qty = Math.max(0, Math.round(+e.target.value || 0));
-      const it = items.find(i => i.code === tr.dataset.code), sm = tr.querySelectorAll('.qty small');
-      if (it) { const f = factorOf(it); let i = 0; if (f > 1) sm[i++].textContent = `= ${fmtNum(p.qty * f)} ${BASE_WORD(it)}`; if (it.unitPrice && sm[i]) sm[i].textContent = `ca. DKK ${fmtKr(p.qty * f * it.unitPrice)}`; }
+      const it = items.find(i => i.code === row.dataset.code);
+      if (it) {
+        const f = factorOf(it);
+        row.querySelector('.q-base').textContent = f > 1 ? `= ${fmtNum(p.qty * f)} ${BASE_WORD(it)}` : '';
+        row.querySelector('.q-kr').textContent = it.unitPrice ? `ca. DKK ${fmtKr(p.qty * f * it.unitPrice)}` : '';
+      }
     }
     updateSum();
-  });
-  U.root.querySelectorAll('[data-h]').forEach(b => b.onclick = () => {
-    horizon = +b.dataset.h; U.root.querySelectorAll('[data-h]').forEach(x => x.setAttribute('aria-pressed', x === b));
-    picks.clear(); render();
   });
   $('.showall').onchange = e => { showAll = e.target.checked; render(); };
   $('.find').addEventListener('input', e => { query = e.target.value.trim().toLowerCase(); render(); $('.find').focus(); });
@@ -524,7 +592,7 @@ function ui() {
     const todo = chosen(); if (!todo.length) return;
     $('.go').disabled = true;
     cart = await readCart();
-    const res = it => $(`.main tr[data-code="${CSS.escape(it.code)}"] td.res`) || { set textContent(v) {}, set innerHTML(v) {} };
+    const res = it => $(`.main [data-code="${CSS.escape(it.code)}"] .res`) || { set textContent(v) {}, set innerHTML(v) {} };
     for (const it of todo) {
       const cell = res(it);
       if (cart[it.code]) { cell.innerHTML = '<span style="color:var(--info)">Lå allerede i kurven</span>'; continue; }
@@ -557,7 +625,7 @@ function ui() {
         LS.set(SENT_KEY, sent);
       }
       else cell.innerHTML = '<span style="color:var(--now)">✗ Kom ikke i kurven</span>';
-      const box = $(`.main tr[data-code="${CSS.escape(it.code)}"] input[type=checkbox]`); if (box) { box.checked = false; box.disabled = true; }
+      const box = $(`.main [data-code="${CSS.escape(it.code)}"] input[type=checkbox]`); if (box) { box.checked = false; box.disabled = true; }
       picks.get(it.code).on = false;
     }
     updateSum();
