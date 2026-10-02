@@ -1,6 +1,6 @@
 // Renewtech Antalis-bestilling: runs on antalis.dk when the bookmark is clicked.
 // Reads the live order history, works out what to order and when, and fills the cart.
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 const CTX = (typeof window.context === 'string' ? window.context : '/eshop');
 const WS = CTX + '/ws/';
 const DA_PLURAL = { stk: 'stk', bundt: 'bundter', palle: 'paller', kasse: 'kasser', pakke: 'pakker', rulle: 'ruller', æske: 'æsker', sæt: 'sæt' };
@@ -205,6 +205,13 @@ function ui() {
     .when b { display: block; font-size: 14.5px; white-space: nowrap } .when small { color: var(--muted); font-size: 12px; white-space: nowrap }
     .when.w-now b, .when.w-now small { color: var(--now) } .when.w-soon b { color: var(--soon) }
     .use { white-space: nowrap } .use b { font-weight: 600 } .use small { display: block; color: var(--muted); font-size: 12px }
+    .attb { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font: 800 12px var(--f); margin-right: 6px; vertical-align: 1px; color: #fff }
+    .attb.att-bad { background: var(--now) } .attb.att-warn { background: #D99A00 } .attb.att-info { background: var(--info) }
+    .attl { font-size: 12.5px; font-weight: 600; margin-top: 3px } .attl.att-bad { color: var(--now) } .attl.att-warn { color: var(--soon) } .attl.att-info { color: var(--info) }
+    tr.att-bad td:first-child { box-shadow: inset 4px 0 0 var(--now) } tr.att-warn td:first-child { box-shadow: inset 4px 0 0 var(--yellow) } tr.att-info td:first-child { box-shadow: inset 4px 0 0 #9CC3EA }
+    tr.att-bad td { background: #FFF6F5 }
+    .bx.att-bad { box-shadow: 0 0 0 2px var(--now); background: #FFF8F7 } .bx.att-warn { box-shadow: 0 0 0 2px var(--yellow) } .bx.att-bad.on, .bx.att-warn.on { box-shadow: 0 0 0 2px var(--green), 0 0 0 5px var(--yellow) }
+    .lead.watch { border-left-color: #D99A00; padding: 8px 14px; font-size: 13.5px; background: #FFFBEA }
     button.i { font: italic 700 11px Georgia, serif; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--soft); color: var(--muted); cursor: pointer; vertical-align: 2px; margin-left: 4px; padding: 0 }
     button.i[aria-expanded=true] { background: var(--navy); color: #fff; border-color: var(--navy) }
     .more { margin-top: 6px; padding: 8px 10px; background: var(--soft); border-radius: 8px; font-size: 12.5px; max-width: 70ch } .more p { margin: 0 0 4px }
@@ -357,6 +364,29 @@ function ui() {
     return `<div class="cov${big ? ' big' : ''}" title="${esc(title)}"><div class="track"><i class="fill ${cls}" style="width:${w}%"></i><b class="mark" style="left:${m}%"></b></div><div class="t"><span>${left <= 0 ? '<b>Tom nu</b>' : `<b>${left > COV_MAX ? COV_MAX + '+' : left} dage</b>`}</span><span>tør ${fmtDate(it.plan.runout)}</span></div></div>`;
   };
   // The few flags that change what you do go on the row; the rest sit under (i).
+  // What needs extra attention, most serious first: bad = act now, warn = keep an eye on it, info = the data is uncertain.
+  const ATT_RANK = { bad: 0, warn: 1, info: 2 };
+  const attOf = it => {
+    const out = [], box = GROUP[it.group]?.box;
+    if (it.plan && !it.inactive && !cart[it.code] && !it.sentAfter) {
+      const d = dayDiff(it.plan.orderBy);
+      if (d <= 0 && !it.onTheWay) out.push(['bad', 'Skal bestilles nu']);
+      else if (it.longLead && d <= LONG_WARN) out.push(['bad', `Lang leveringstid: bestil senest ${fmtDay(it.plan.orderBy)}`]);
+      else if (d <= 14 && d > 0) out.push(['warn', `Bestil senest ${fmtDay(it.plan.orderBy)}`]);
+    }
+    if (it.overbought && it.onTheWay) out.push(['warn', `Ordre på vej (${fmtDate(it.onTheWay)}), selvom der er købt ${it.overbought.x.toFixed(1).replace('.', ',')}× det normale`]);
+    else if (it.overbought) out.push(['warn', `Købt ${it.overbought.x.toFixed(1).replace('.', ',')}× det normale for nylig`]);
+    if (box && it.conf === 'unk') out.push(['info', 'Ukendt størrelse']);
+    if (box && it.conf === 'guess') out.push(['info', 'Navn ikke bekræftet']);
+    if (box && it.plan && it.plan.lowData) out.push(['info', `Kun ${it.orders} køb: forbruget er usikkert`]);
+    return out.sort((a, b) => ATT_RANK[a[0]] - ATT_RANK[b[0]]);
+  };
+  // Only red and yellow stand out; uncertain data (blue) is listed quietly under (i), so the important ones are not drowned.
+  const actOf = it => attOf(it).filter(x => x[0] !== 'info');
+  const attCls = it => { const a = actOf(it); return a.length ? ' att-' + a[0][0] : ''; };
+  const attHtml = it => { const a = actOf(it); return a.length ? `<div class="attl att-${a[0][0]}">${a.map(x => esc(x[1])).join(' · ')}</div>` : ''; };
+  const attBadge = it => { const a = actOf(it); return a.length ? `<span class="attb att-${a[0][0]}" title="${esc(a.map(x => x[1]).join(' · '))}">!</span>` : ''; };
+  const infoHtml = it => { const a = attOf(it).filter(x => x[0] === 'info'); return a.length ? `<p class="attl att-info">${a.map(x => esc(x[1])).join(' · ')}</p>` : ''; };
   const mainFlags = it => [
     wishSet.has(it.code) ? '<span class="pill ok">Fra kasseoversigten</span>' : '',
     it.longLead ? `<span class="pill now">Lang lev.tid · ${it.plan ? it.plan.lead : it.lead} d</span>` : '',
@@ -381,10 +411,10 @@ function ui() {
   const checkHtml = it => { const p = pickFor(it), c = cart[it.code]; return `<input type="checkbox" aria-label="Vælg ${esc(nameOf(it))}" ${p.on ? 'checked' : ''} ${c ? 'disabled title="Ligger allerede i kurven"' : ''}>`; };
   const rowHtml = it => {
     const p = pickFor(it), full = it.name && it.title && !/ingen beskrivelse/.test(it.title) ? it.title : '';
-    return `<tr data-code="${esc(it.code)}" class="${p.on ? '' : 'off'}">
+    return `<tr data-code="${esc(it.code)}" class="${p.on ? '' : 'off'}${attCls(it)}">
       <td style="width:28px">${checkHtml(it)}</td>
-      <td><div class="nm">${esc(nameOf(it))} <button class="i" type="button" aria-expanded="false" title="Hvorfor?">i</button></div><div class="meta">${subOf(it)}</div>${specHtml(it)}${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
-        <div class="more" hidden><p>${why(it)}</p>${full ? `<p class="muted">Antalis: ${esc(full.slice(0, 140))}</p>` : ''}${moreFlags(it)}</div></td>
+      <td><div class="nm">${attBadge(it)}${esc(nameOf(it))} <button class="i" type="button" aria-expanded="false" title="Hvorfor?">i</button></div><div class="meta">${subOf(it)}</div>${attHtml(it)}${specHtml(it)}${mainFlags(it) ? `<div class="flags">${mainFlags(it)}</div>` : ''}
+        <div class="more" hidden>${infoHtml(it)}<p>${why(it)}</p>${full ? `<p class="muted">Antalis: ${esc(full.slice(0, 140))}</p>` : ''}${moreFlags(it)}</div></td>
       <td>${whenCell(it)}</td>
       <td>${cover(it)}</td>
       <td>${useCell(it)}</td>
@@ -393,8 +423,9 @@ function ui() {
   };
   const cardHtml = it => {
     const p = pickFor(it), cls = 'st-' + (!it.plan || it.inactive ? 'idle' : it.state);
-    return `<div class="bx ${cls}${p.on ? ' on' : ''}" data-code="${esc(it.code)}">
-      <div class="bx-h"><div><div class="nm">${esc(nameOf(it))}</div><div class="meta">${subOf(it)}</div></div>${whenCell(it)}</div>
+    return `<div class="bx ${cls}${p.on ? ' on' : ''}${attCls(it)}" data-code="${esc(it.code)}">
+      <div class="bx-h"><div><div class="nm">${attBadge(it)}${esc(nameOf(it))}</div><div class="meta">${subOf(it)}</div></div>${whenCell(it)}</div>
+      ${attHtml(it)}
       ${specHtml(it)}
       ${cover(it, true)}
       <div class="bx-m">${it.plan ? `${weekTxt(it)} ${BASE_WORD(it)}/uge · lev.tid ${it.plan.lead} d` : `Kun ${it.orders} køb · lev.tid ${it.lead} d`}</div>
@@ -436,6 +467,8 @@ function ui() {
       const first = planned[0], same = planned.filter(it => it.plan.orderBy <= first.plan.orderBy + 3 * DAY);
       lead = `<div class="lead"><span class="big">Intet skal bestilles i dag</span><span>Næste bestilling senest <b>${fmtDay(first.plan.orderBy)}</b> (${rel(dayDiff(first.plan.orderBy))}): ${names(same)}</span></div>`;
     } else lead = `<div class="lead"><span class="big">Intet skal bestilles</span><span>Ingen varer har nok køb til en plan endnu.</span></div>`;
+    const watch = items.filter(it => GROUP[it.group]?.box && attOf(it).some(a => a[0] === 'warn') && !attOf(it).some(a => a[0] === 'bad'));
+    if (watch.length) lead += `<div class="lead watch"><span><b>Hold øje med:</b> ${watch.slice(0, 5).map(it => `<b>${esc(nameOf(it))}</b> (${esc(attOf(it).find(a => a[0] === 'warn')[1])})`).join(' · ')}${watch.length > 5 ? ` og ${watch.length - 5} mere` : ''}</span></div>`;
     if (longDue.length) lead += `<div class="lead long"><span>Lang leveringstid: ${longDue.map(it => `<b>${esc(nameOf(it))}</b> senest ${fmtDay(it.plan.orderBy)}`).join(' · ')}</span></div>`;
     const wayN = items.filter(it => it.onTheWay).length, cartN = Object.keys(cart).length;
     $('.hero').hidden = false;

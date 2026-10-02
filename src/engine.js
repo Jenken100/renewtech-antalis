@@ -48,7 +48,8 @@ const BOXES = {
   '750195': ['pal', '80 pallekasse top stor', '772×586×323', 'ok'],
   '734203': ['pal', '100 pallekasse bund', '953×553×160', 'bc'],
   '704304': ['pal', '100 pallekasse top lille', '972×586×164', 'ok'],
-  '729150': ['pal', '100 pallekasse top (mellem?)', '', 'guess'],
+  // Size from Antalis' own open-orders mail 30-09-2026 ("Pallekasse, Renewtech, 972x586x243").
+  '729150': ['pal', '100 pallekasse top mellem', '972×586×243', 'ok'],
   '704307': ['srv', '60×60×48', '600×600×480', 'ok'],
   '704256': ['srv', 'Railkit-kasse?', '900×350×100', 'guess'],
   '704258': ['srv', 'Server-/specialkasse', '700×355×200/155', 'ok'],
